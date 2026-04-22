@@ -1,0 +1,326 @@
+name: ${PLANE_COMPOSE_PROJECT:-plane-prod}
+
+x-backend-env: &backend-env
+  WEB_URL: ${PLANE_PUBLIC_URL:-http://localhost:18130}
+  APP_BASE_URL: ${PLANE_PUBLIC_URL:-http://localhost:18130}
+  APP_BASE_PATH: ""
+  ADMIN_BASE_URL: ${PLANE_PUBLIC_URL:-http://localhost:18130}
+  ADMIN_BASE_PATH: /god-mode
+  SPACE_BASE_URL: ${PLANE_PUBLIC_URL:-http://localhost:18130}
+  SPACE_BASE_PATH: /spaces
+  LIVE_BASE_URL: ${PLANE_PUBLIC_URL:-http://localhost:18130}
+  LIVE_BASE_PATH: /live
+  CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-${PLANE_PUBLIC_URL:-http://localhost:18130}}
+  DEBUG: "0"
+  SECRET_KEY: ${SECRET_KEY:?SECRET_KEY is required}
+  DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+  POSTGRES_USER: ${POSTGRES_USER:-plane}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+  POSTGRES_HOST: plane-db
+  POSTGRES_DB: ${POSTGRES_DB:-plane}
+  POSTGRES_PORT: "5432"
+  REDIS_HOST: plane-redis
+  REDIS_PORT: "6379"
+  REDIS_URL: redis://plane-redis:6379/
+  RABBITMQ_HOST: plane-mq
+  RABBITMQ_PORT: "5672"
+  RABBITMQ_USER: ${RABBITMQ_USER:-plane}
+  RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD is required}
+  RABBITMQ_VHOST: ${RABBITMQ_VHOST:-plane}
+  AWS_REGION: ${AWS_REGION:-}
+  AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:?AWS_ACCESS_KEY_ID is required}
+  AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:?AWS_SECRET_ACCESS_KEY is required}
+  AWS_S3_ENDPOINT_URL: http://plane-minio:9000
+  AWS_S3_BUCKET_NAME: ${AWS_S3_BUCKET_NAME:-uploads}
+  FILE_SIZE_LIMIT: ${FILE_SIZE_LIMIT:-5242880}
+  SIGNED_URL_EXPIRATION: ${SIGNED_URL_EXPIRATION:-3600}
+  DOCKERIZED: "1"
+  USE_MINIO: "1"
+  GUNICORN_WORKERS: ${GUNICORN_WORKERS:-2}
+  HARD_DELETE_AFTER_DAYS: ${HARD_DELETE_AFTER_DAYS:-60}
+  MINIO_ENDPOINT_SSL: "0"
+  API_KEY_RATE_LIMIT: ${API_KEY_RATE_LIMIT:-60/minute}
+  LIVE_SERVER_SECRET_KEY: ${LIVE_SERVER_SECRET_KEY:?LIVE_SERVER_SECRET_KEY is required}
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: ./apps/web/Dockerfile.web
+      args:
+        DOCKER_BUILDKIT: 1
+        VITE_API_BASE_URL: ""
+        VITE_ADMIN_BASE_URL: ""
+        VITE_ADMIN_BASE_PATH: /god-mode
+        VITE_LIVE_BASE_URL: ""
+        VITE_LIVE_BASE_PATH: /live
+        VITE_SPACE_BASE_URL: ""
+        VITE_SPACE_BASE_PATH: /spaces
+        VITE_WEB_BASE_URL: ""
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_started
+    networks:
+      - plane-prod
+
+  admin:
+    build:
+      context: .
+      dockerfile: ./apps/admin/Dockerfile.admin
+      args:
+        DOCKER_BUILDKIT: 1
+        VITE_API_BASE_URL: ""
+        VITE_API_BASE_PATH: /api
+        VITE_ADMIN_BASE_URL: ""
+        VITE_ADMIN_BASE_PATH: /god-mode
+        VITE_SPACE_BASE_URL: ""
+        VITE_SPACE_BASE_PATH: /spaces
+        VITE_LIVE_BASE_URL: ""
+        VITE_LIVE_BASE_PATH: /live
+        VITE_WEB_BASE_URL: ""
+        VITE_WEB_BASE_PATH: ""
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_started
+      web:
+        condition: service_started
+    networks:
+      - plane-prod
+
+  space:
+    build:
+      context: .
+      dockerfile: ./apps/space/Dockerfile.space
+      args:
+        DOCKER_BUILDKIT: 1
+        VITE_API_BASE_URL: ""
+        VITE_API_BASE_PATH: /api
+        VITE_ADMIN_BASE_URL: ""
+        VITE_ADMIN_BASE_PATH: /god-mode
+        VITE_SPACE_BASE_URL: ""
+        VITE_SPACE_BASE_PATH: /spaces
+        VITE_LIVE_BASE_URL: ""
+        VITE_LIVE_BASE_PATH: /live
+        VITE_WEB_BASE_URL: ""
+        VITE_WEB_BASE_PATH: ""
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_started
+      web:
+        condition: service_started
+    networks:
+      - plane-prod
+
+  live:
+    build:
+      context: .
+      dockerfile: ./apps/live/Dockerfile.live
+      args:
+        DOCKER_BUILDKIT: 1
+    restart: unless-stopped
+    environment:
+      <<: *backend-env
+      API_BASE_URL: http://api:8000
+    depends_on:
+      api:
+        condition: service_started
+      plane-redis:
+        condition: service_healthy
+    networks:
+      - plane-prod
+
+  api:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile.api
+      args:
+        DOCKER_BUILDKIT: 1
+    restart: unless-stopped
+    command: ./bin/docker-entrypoint-api.sh
+    environment:
+      <<: *backend-env
+    depends_on:
+      plane-db:
+        condition: service_healthy
+      plane-redis:
+        condition: service_healthy
+      plane-mq:
+        condition: service_healthy
+      plane-minio:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:8000/api/instances/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    networks:
+      - plane-prod
+
+  worker:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile.api
+      args:
+        DOCKER_BUILDKIT: 1
+    restart: unless-stopped
+    command: ./bin/docker-entrypoint-worker.sh
+    environment:
+      <<: *backend-env
+    depends_on:
+      api:
+        condition: service_started
+      plane-db:
+        condition: service_healthy
+      plane-redis:
+        condition: service_healthy
+      plane-mq:
+        condition: service_healthy
+    networks:
+      - plane-prod
+
+  beat-worker:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile.api
+      args:
+        DOCKER_BUILDKIT: 1
+    restart: unless-stopped
+    command: ./bin/docker-entrypoint-beat.sh
+    environment:
+      <<: *backend-env
+    depends_on:
+      api:
+        condition: service_started
+      plane-db:
+        condition: service_healthy
+      plane-redis:
+        condition: service_healthy
+      plane-mq:
+        condition: service_healthy
+    networks:
+      - plane-prod
+
+  migrator:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile.api
+      args:
+        DOCKER_BUILDKIT: 1
+    command: ./bin/docker-entrypoint-migrator.sh
+    restart: "no"
+    profiles:
+      - migrate
+    environment:
+      <<: *backend-env
+    depends_on:
+      plane-db:
+        condition: service_healthy
+      plane-redis:
+        condition: service_healthy
+    networks:
+      - plane-prod
+
+  plane-db:
+    image: postgres:15.7-alpine
+    restart: unless-stopped
+    command: postgres -c 'max_connections=1000'
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-plane}
+      POSTGRES_DB: ${POSTGRES_DB:-plane}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      PGDATA: /var/lib/postgresql/data
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-plane} -d ${POSTGRES_DB:-plane}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - plane-prod
+
+  plane-redis:
+    image: valkey/valkey:7.2.11-alpine
+    restart: unless-stopped
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - plane-prod
+
+  plane-mq:
+    image: rabbitmq:3.13.6-management-alpine
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-plane}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD is required}
+      RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST:-plane}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - plane-prod
+
+  plane-minio:
+    image: minio/minio
+    restart: unless-stopped
+    command: server /export --console-address ":9090"
+    environment:
+      MINIO_ROOT_USER: ${AWS_ACCESS_KEY_ID:?AWS_ACCESS_KEY_ID is required}
+      MINIO_ROOT_PASSWORD: ${AWS_SECRET_ACCESS_KEY:?AWS_SECRET_ACCESS_KEY is required}
+    volumes:
+      - uploads:/export
+    networks:
+      - plane-prod
+
+  proxy:
+    build:
+      context: ./apps/proxy
+      dockerfile: Dockerfile.ce
+    restart: unless-stopped
+    ports:
+      - "${PLANE_BIND_HOST:-127.0.0.1}:${PLANE_PORT:-18130}:80"
+    environment:
+      SITE_ADDRESS: :80
+      CERT_EMAIL: ""
+      CERT_ACME_DNS: ""
+      CERT_ACME_CA: https://acme-v02.api.letsencrypt.org/directory
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-0.0.0.0/0}
+      FILE_SIZE_LIMIT: ${FILE_SIZE_LIMIT:-5242880}
+      BUCKET_NAME: ${AWS_S3_BUCKET_NAME:-uploads}
+    depends_on:
+      web:
+        condition: service_started
+      api:
+        condition: service_started
+      space:
+        condition: service_started
+      admin:
+        condition: service_started
+      live:
+        condition: service_started
+      plane-minio:
+        condition: service_started
+    networks:
+      - plane-prod
+
+volumes:
+  pgdata:
+  redisdata:
+  uploads:
+  rabbitmq_data:
+
+networks:
+  plane-prod:

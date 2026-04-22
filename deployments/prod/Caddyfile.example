@@ -1,0 +1,8 @@
+# External host-level Caddy entrypoint for Plane.
+# This Caddy instance owns TLS and forwards traffic to the single port
+# published by docker-compose.prod.yml.
+
+plane.example.com {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:18130
+}
