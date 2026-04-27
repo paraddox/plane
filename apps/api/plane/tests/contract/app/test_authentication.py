@@ -8,10 +8,13 @@ import pytest
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
+from rest_framework.exceptions import PermissionDenied
+from rest_framework.test import APIRequestFactory
 from django.test import Client
 from django.core.exceptions import ValidationError
 from unittest.mock import patch
 
+from plane.authentication.session import BaseSessionAuthentication
 from plane.db.models import User
 from plane.settings.redis import redis_instance
 from plane.license.models import Instance
@@ -42,6 +45,14 @@ def django_client():
     """Return a Django test client with User-Agent header for handling redirects"""
     client = Client(HTTP_USER_AGENT="Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:15.0) Gecko/20100101 Firefox/15.0.1")
     return client
+
+
+@pytest.mark.contract
+def test_session_authentication_enforces_csrf():
+    request = APIRequestFactory().post("/api/users/me/", {})
+
+    with pytest.raises(PermissionDenied):
+        BaseSessionAuthentication().enforce_csrf(request)
 
 
 @pytest.mark.contract
@@ -320,6 +331,28 @@ class TestMagicSignIn:
 
         # The user should now be authenticated
         assert "_auth_user_id" in django_client.session
+
+    @pytest.mark.django_db
+    @patch("plane.bgtasks.magic_link_code_task.magic_link.delay")
+    def test_magic_code_sign_in_exhausts_after_failed_attempts(
+        self, mock_magic_link, django_client, api_client, setup_user, setup_instance
+    ):
+        gen_url = reverse("magic-generate")
+        response = api_client.post(gen_url, {"email": "user@plane.so"}, format="json")
+        assert response.status_code == status.HTTP_200_OK
+
+        ri = redis_instance()
+        url = reverse("magic-sign-in")
+
+        for _ in range(4):
+            response = django_client.post(url, {"email": "user@plane.so", "code": "000000"}, follow=False)
+            assert response.status_code == 302
+            assert "INVALID_MAGIC_CODE_SIGN_IN" in response.url
+
+        response = django_client.post(url, {"email": "user@plane.so", "code": "000000"}, follow=False)
+        assert response.status_code == 302
+        assert "EMAIL_CODE_ATTEMPT_EXHAUSTED_SIGN_IN" in response.url
+        assert not ri.exists("magic_user@plane.so")
 
 
 @pytest.mark.contract

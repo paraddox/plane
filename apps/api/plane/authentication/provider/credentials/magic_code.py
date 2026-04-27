@@ -16,6 +16,7 @@ from plane.authentication.adapter.error import (
     AUTHENTICATION_ERROR_CODES,
     AuthenticationException,
 )
+from plane.authentication.rate_limit import MAGIC_CODE_FAILED_ATTEMPT_LIMIT
 from plane.db.models import User
 
 
@@ -65,7 +66,7 @@ class MagicCodeProvider(CredentialAdapter):
 
             current_attempt = data["current_attempt"] + 1
 
-            if data["current_attempt"] > 2:
+            if current_attempt > 2:
                 email = str(self.key).replace("magic_", "", 1)
                 if User.objects.filter(email=email).exists():
                     raise AuthenticationException(
@@ -83,12 +84,13 @@ class MagicCodeProvider(CredentialAdapter):
             value = {
                 "current_attempt": current_attempt,
                 "email": str(self.key),
+                "failed_attempt": 0,
                 "token": token,
             }
             expiry = 600
             ri.set(key, json.dumps(value), ex=expiry)
         else:
-            value = {"current_attempt": 0, "email": self.key, "token": token}
+            value = {"current_attempt": 0, "email": self.key, "failed_attempt": 0, "token": token}
             expiry = 600
 
             ri.set(key, json.dumps(value), ex=expiry)
@@ -119,6 +121,26 @@ class MagicCodeProvider(CredentialAdapter):
                 return
             else:
                 email = str(self.key).replace("magic_", "", 1)
+                failed_attempt = int(data.get("failed_attempt", 0)) + 1
+                if failed_attempt >= MAGIC_CODE_FAILED_ATTEMPT_LIMIT:
+                    ri.delete(self.key)
+                    if User.objects.filter(email=email).exists():
+                        raise AuthenticationException(
+                            error_code=AUTHENTICATION_ERROR_CODES["EMAIL_CODE_ATTEMPT_EXHAUSTED_SIGN_IN"],
+                            error_message="EMAIL_CODE_ATTEMPT_EXHAUSTED_SIGN_IN",
+                            payload={"email": str(email)},
+                        )
+                    else:
+                        raise AuthenticationException(
+                            error_code=AUTHENTICATION_ERROR_CODES["EMAIL_CODE_ATTEMPT_EXHAUSTED_SIGN_UP"],
+                            error_message="EMAIL_CODE_ATTEMPT_EXHAUSTED_SIGN_UP",
+                            payload={"email": str(email)},
+                        )
+
+                data["failed_attempt"] = failed_attempt
+                ttl = ri.ttl(self.key)
+                ri.set(self.key, json.dumps(data), ex=ttl if ttl and ttl > 0 else 600)
+
                 if User.objects.filter(email=email).exists():
                     raise AuthenticationException(
                         error_code=AUTHENTICATION_ERROR_CODES["INVALID_MAGIC_CODE_SIGN_IN"],
