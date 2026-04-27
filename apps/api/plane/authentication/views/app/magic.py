@@ -26,7 +26,7 @@ from plane.authentication.adapter.error import (
     AuthenticationException,
     AUTHENTICATION_ERROR_CODES,
 )
-from plane.authentication.rate_limit import AuthenticationThrottle
+from plane.authentication.rate_limit import AuthenticationThrottle, authentication_rate_limit_response
 from plane.utils.path_validator import get_safe_redirect_url
 
 
@@ -64,6 +64,13 @@ class MagicSignInEndpoint(View):
         code = request.POST.get("code", "").strip()
         email = request.POST.get("email", "").strip().lower()
         next_path = request.POST.get("next_path")
+        rate_limit_response = authentication_rate_limit_response(
+            request=request,
+            scope="app_magic_sign_in",
+            identifier=email,
+        )
+        if rate_limit_response:
+            return rate_limit_response
 
         if code == "" or email == "":
             exc = AuthenticationException(
@@ -135,6 +142,13 @@ class MagicSignUpEndpoint(View):
         code = request.POST.get("code", "").strip()
         email = request.POST.get("email", "").strip().lower()
         next_path = request.POST.get("next_path")
+        rate_limit_response = authentication_rate_limit_response(
+            request=request,
+            scope="app_magic_sign_up",
+            identifier=email,
+        )
+        if rate_limit_response:
+            return rate_limit_response
 
         if code == "" or email == "":
             exc = AuthenticationException(

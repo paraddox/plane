@@ -20,6 +20,7 @@ from plane.authentication.adapter.error import (
     AuthenticationException,
     AUTHENTICATION_ERROR_CODES,
 )
+from plane.authentication.rate_limit import authentication_rate_limit_response
 from plane.utils.path_validator import get_safe_redirect_url
 
 
@@ -46,6 +47,13 @@ class SignInAuthEndpoint(View):
         # set the referer as session to redirect after login
         email = request.POST.get("email", False)
         password = request.POST.get("password", False)
+        rate_limit_response = authentication_rate_limit_response(
+            request=request,
+            scope="app_sign_in",
+            identifier=email,
+        )
+        if rate_limit_response:
+            return rate_limit_response
 
         ## Raise exception if any of the above are missing
         if not email or not password:
@@ -153,6 +161,14 @@ class SignUpAuthEndpoint(View):
 
         email = request.POST.get("email", False)
         password = request.POST.get("password", False)
+        rate_limit_response = authentication_rate_limit_response(
+            request=request,
+            scope="app_sign_up",
+            identifier=email,
+        )
+        if rate_limit_response:
+            return rate_limit_response
+
         ## Raise exception if any of the above are missing
         if not email or not password:
             # Redirection params

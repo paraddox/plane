@@ -5,12 +5,21 @@
  */
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import type { AxiosInstance, AxiosRequestConfig } from "axios";
-import axios from "axios";
+import type { AxiosInstance, AxiosRequestConfig, InternalAxiosRequestConfig } from "axios";
+import axios, { AxiosHeaders } from "axios";
+
+const CSRF_TOKEN_PATH = "/auth/get-csrf-token/";
+const CSRF_PROTECTED_METHODS = new Set(["post", "put", "patch", "delete"]);
+
+type CSRFTokenResponse = {
+  csrf_token?: string;
+};
 
 export abstract class APIService {
   protected baseURL: string;
   private axiosInstance: AxiosInstance;
+  private csrfToken?: string;
+  private csrfTokenPromise?: Promise<string | undefined>;
 
   constructor(baseURL: string) {
     this.baseURL = baseURL;
@@ -20,6 +29,7 @@ export abstract class APIService {
     });
 
     this.setupInterceptors();
+    this.setupCSRFInterceptor();
   }
 
   private setupInterceptors() {
@@ -33,6 +43,64 @@ export abstract class APIService {
         return Promise.reject(error);
       }
     );
+  }
+
+  private setupCSRFInterceptor() {
+    this.axiosInstance.interceptors.request.use(async (config: InternalAxiosRequestConfig) => {
+      if (!this.needsCSRFToken(config)) return config;
+
+      const csrfToken = await this.getCSRFToken();
+      if (csrfToken) {
+        const headers = AxiosHeaders.from(config.headers);
+        headers.set("X-CSRFTOKEN", csrfToken);
+        config.headers = headers;
+      }
+
+      return config;
+    });
+  }
+
+  private needsCSRFToken(config: InternalAxiosRequestConfig) {
+    const method = config.method?.toLowerCase();
+    if (!method || !CSRF_PROTECTED_METHODS.has(method)) return false;
+    if (config.withCredentials === false) return false;
+
+    const url = config.url ?? "";
+    if (url.includes(CSRF_TOKEN_PATH)) return false;
+    if (this.isExternalURL(url)) return false;
+
+    const headers = AxiosHeaders.from(config.headers);
+    return !(headers.has("X-CSRFTOKEN") || headers.has("X-CSRFToken") || headers.has("X-CSRF-TOKEN"));
+  }
+
+  private isExternalURL(url: string) {
+    if (!/^https?:\/\//i.test(url)) return false;
+
+    const baseURL = this.baseURL.replace(/\/$/, "");
+    return !baseURL || !url.startsWith(baseURL);
+  }
+
+  private async getCSRFToken() {
+    if (this.csrfToken) return this.csrfToken;
+
+    if (!this.csrfTokenPromise) {
+      const tokenURL = `${this.baseURL.replace(/\/$/, "")}${CSRF_TOKEN_PATH}`;
+      this.csrfTokenPromise = axios
+        .get<CSRFTokenResponse>(tokenURL, {
+          withCredentials: true,
+          validateStatus: null,
+        })
+        .then((response) => {
+          const csrfToken = response.data?.csrf_token;
+          if (csrfToken) this.csrfToken = csrfToken;
+          return csrfToken;
+        })
+        .finally(() => {
+          this.csrfTokenPromise = undefined;
+        });
+    }
+
+    return this.csrfTokenPromise;
   }
 
   get(url: string, params = {}, config: AxiosRequestConfig = {}) {
