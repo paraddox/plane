@@ -19,6 +19,7 @@ from plane.db.models import (
     APIToken,
     FileAsset,
     Issue,
+    Module,
     ProjectExecutionPolicy,
     ProjectMember,
     State,
@@ -89,6 +90,117 @@ def worker_client(execution, run_id):
     client = APIClient()
     client.credentials(HTTP_X_API_KEY=response.data["token"])
     return client, response
+
+
+@pytest.fixture
+def execution_child(execution):
+    _, _, _, issue, _, _, _, _, _, prefix = execution
+    run_id = claim(execution)
+    agent, _ = worker_client(execution, run_id)
+    response = agent.post(
+        prefix + f"work-items/{issue.pk}/children/",
+        {
+            "name": "Agent child",
+            "requirements": "Focused requirement",
+            "definition_of_done": [{"description": "Child test passes"}],
+        },
+        format="json",
+    )
+    assert response.status_code == 201, response.data
+    return agent, run_id, Issue.objects.get(pk=response.data["issue"])
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("target", ["root", "child"])
+def test_execution_patch_cannot_soft_delete_work_items(execution, execution_child, target):
+    _, _, project, root, _, _, _, _, _, prefix = execution
+    agent, run_id, child = execution_child
+    issue = root if target == "root" else child
+    url = f"/api/v1/workspaces/{project.workspace.slug}/projects/{project.pk}/work-items/{issue.pk}/"
+    response = agent.patch(url, {"deleted_at": timezone.now().isoformat()}, format="json")
+    assert response.status_code == 403, response.data
+    assert Issue.all_objects.get(pk=issue.pk).deleted_at is None
+    assert agent.get(prefix + f"runs/{run_id}/").status_code == 200
+    assert agent.patch(url, {"name": "Permitted update"}, format="json").status_code == 200
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("action", ["patch", "delete", "bulk", "upsert", "modules"])
+def test_personal_keys_cannot_mutate_agent_children(execution, execution_child, api_key_client, action):
+    _, _, project, _, _, _, _, _, _, _ = execution
+    agent, _, child = execution_child
+    Issue.objects.filter(pk=child.pk).update(external_id="child-external", external_source="integration")
+    done = State.objects.create(project=project, name="Done", group="completed", color="#777777")
+    base = f"/api/v1/workspaces/{project.workspace.slug}/projects/{project.pk}/"
+    detail = base + f"work-items/{child.pk}/"
+    assert api_key_client.get(detail).status_code == 200
+    if action == "patch":
+        response = api_key_client.patch(detail, {"state": str(done.pk)}, format="json")
+    elif action == "delete":
+        response = api_key_client.delete(detail)
+    elif action == "bulk":
+        response = api_key_client.post(
+            base + "work-items/bulk/",
+            {"updates": [{"id": str(child.pk), "data": {"state": str(done.pk)}}]},
+            format="json",
+        )
+    elif action == "upsert":
+        response = api_key_client.put(
+            base + "work-items/upsert/",
+            {"external_id": "child-external", "external_source": "integration", "state": str(done.pk)},
+            format="json",
+        )
+    else:
+        module = Module.objects.create(project=project, name="Module")
+        response = api_key_client.post(
+            base + f"modules/{module.pk}/module-issues/", {"issues": [str(child.pk)]}, format="json"
+        )
+    assert response.status_code == 403, getattr(response, "data", None)
+    saved = Issue.all_objects.get(pk=child.pk)
+    assert saved.deleted_at is None and saved.state_id != done.pk
+    assert agent.patch(detail, {"state": str(done.pk)}, format="json").status_code == 200
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("action", ["patch", "delete", "bulk"])
+@pytest.mark.parametrize("idempotent", [False, True])
+def test_personal_mutations_recheck_contracts_added_after_authentication(
+    execution, api_key_client, monkeypatch, action, idempotent
+):
+    from plane.api.middleware.api_authentication import APIKeyAuthentication
+
+    _, _, project, _, owner_contract, _, _, _, _, _ = execution
+    first = Issue.objects.create(project=project, name="First ordinary")
+    protected = Issue.objects.create(project=project, name="Newly coordinated")
+    record_usage = APIKeyAuthentication.record_usage
+
+    def add_contract(self, token):
+        record_usage(self, token)
+        WorkItemContract.objects.create(project=project, issue=protected, owner=owner_contract.owner)
+
+    monkeypatch.setattr(APIKeyAuthentication, "record_usage", add_contract)
+    base = f"/api/v1/workspaces/{project.workspace.slug}/projects/{project.pk}/work-items/"
+    headers = {"HTTP_IDEMPOTENCY_KEY": "coordination-race"} if idempotent else {}
+    if action == "bulk":
+        response = api_key_client.post(
+            base + "bulk/",
+            {
+                "updates": [
+                    {"id": str(first.pk), "data": {"name": "Changed first"}},
+                    {"id": str(protected.pk), "data": {"name": "Unauthorized"}},
+                ]
+            },
+            format="json",
+            **headers,
+        )
+    elif action == "patch":
+        response = api_key_client.patch(base + f"{protected.pk}/", {"name": "Unauthorized"}, format="json", **headers)
+    else:
+        response = api_key_client.delete(base + f"{protected.pk}/", **headers)
+    assert response.status_code == 403, response.data
+    saved = Issue.all_objects.get(pk=protected.pk)
+    assert saved.name == "Newly coordinated" and saved.deleted_at is None
+    assert Issue.objects.get(pk=first.pk).name == "First ordinary"
 
 
 @pytest.mark.django_db

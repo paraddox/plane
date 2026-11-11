@@ -84,9 +84,9 @@ class ApiKeyRateThrottle(SimpleRateThrottle):
 class APIKeyRateLimitMixin:
     def initial(self, request, *args, **kwargs):
         super().initial(request, *args, **kwargs)
-        from plane.coordination.access import guard_execution_mutation
+        from plane.coordination.access import guard_coordination_mutation
 
-        guard_execution_mutation(self, request)
+        guard_coordination_mutation(self, request)
 
     def get_throttles(self):
         return [ApiKeyRateThrottle()]

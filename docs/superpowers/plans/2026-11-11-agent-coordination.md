@@ -170,7 +170,7 @@ creation surfaces, project settings/releases, shared services/types, docs.
 
 ## Final Evidence
 
-- 372 backend API/authentication/security/coordination tests passed with actual
+- 385 backend API/authentication/security/coordination tests passed with actual
   PostgreSQL migrations and Valkey, including the real-HTTP GitHub fixture and
   concurrent claim/credential/revocation checks. Schema validation is included.
 - Main migration 0122 upgraded through 0130 with existing tasks and hashed keys
@@ -248,6 +248,25 @@ through 0130 preserved tasks, keys, answers and authenticated API access; revers
 to 0127 and reapplying succeeded. Migration drift checking also passed. No code
 changes were needed following restored-runtime verification. The earlier runtime
 validation limitation on commit 2b0f1a6ea is therefore cleared.
+
+### Additional Authorization Guards
+
+The next three review findings were reproduced in 13 failing API/PostgreSQL
+regression cases, fixed, and verified:
+
+- Execution PATCH rejects `deleted_at` for both roots and children. Valid
+  updates still work and rejected deletion does not invalidate the live run.
+- Personal-key write restrictions include RunChild records, covering PATCH,
+  DELETE, bulk updates, external-ID upserts, and module assignment. Reads and
+  valid execution completion remain available.
+- The shared mutation guard now locks personal-key task targets in stable UUID
+  order and rechecks coordination access before invoking the handler. Contract
+  creation takes the same issue lock. PATCH, DELETE, and bulk races are tested
+  both with and without idempotency, including unchanged bulk rows on denial.
+
+All 13 regressions passed after the fixes; the full relevant API/auth/security
+suite passed 385 tests with actual migrations. Scoped Ruff lint/format and diff
+checks passed. No model or migration changes were needed for these findings.
 
 ## Execution Notes
 

@@ -188,6 +188,11 @@ new outbound webhook sender, delivery secret, or polling-interval policy.
 
 The existing v1 work-item endpoints permit scoped reads/updates, append-only
 comments, relations between granted targets, and owned artifact uploads.
+Execution credentials cannot delete work items, including through a `deleted_at`
+PATCH. Personal keys may read coordinated roots and children, but mutations to
+either require the assigned execution credential or the human session workflow.
+Personal-key mutations lock and recheck their task targets before writing so
+concurrent contract creation cannot bypass this restriction.
 Project context is read-only. Bulk mutations, credential delegation, reviewer
 decisions, actor/owner rewriting, arbitrary task access and root reparenting are
 not execution capabilities. Creating a child extends targets server-side; task

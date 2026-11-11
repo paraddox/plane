@@ -9,7 +9,7 @@ from django.db import transaction
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import SAFE_METHODS
 
-from plane.db.models import APIToken, AgentRun, FileAsset, Issue, RunTarget, WorkItemContract
+from plane.db.models import APIToken, AgentRun, FileAsset, Issue, RunChild, RunTarget, WorkItemContract
 from .execution import lock_execution_credential, locked_run, require_agent_access, validate_live_run
 
 
@@ -78,6 +78,43 @@ def require_targets(run, identifiers):
         raise PermissionDenied("This execution is not authorized for those work items.")
 
 
+def personal_write_targets(request, *, resolved_issue_id=None):
+    if resolved_issue_id is not None:
+        return [resolved_issue_id]
+    context = request.parser_context or {}
+    view = context.get("view")
+    view_name = view.__class__.__name__ if view else ""
+    kwargs = context.get("kwargs", {})
+    target_field, _ = TASK_VIEWS.get(view_name, ("issue_id", None))
+    target_id = kwargs.get(target_field)
+    if view_name == "BulkWorkItemAPIEndpoint":
+        updates = request.data.get("updates", [])
+        return (
+            parsed_ids([item.get("id") for item in updates if isinstance(item, dict)])
+            if isinstance(updates, list)
+            else []
+        )
+    if view_name == "ModuleIssueListCreateAPIEndpoint":
+        return parsed_ids(request.data.get("issues", []))
+    if (
+        view_name == "IssueDetailAPIEndpoint"
+        and request.method == "PUT"
+        and not target_id
+        and isinstance(request.data, dict)
+        and request.data.get("external_id")
+        and request.data.get("external_source")
+    ):
+        return list(
+            Issue.objects.filter(
+                project_id=kwargs.get("project_id"),
+                workspace__slug=kwargs.get("slug"),
+                external_id=request.data["external_id"],
+                external_source=request.data["external_source"],
+            ).values_list("id", flat=True)
+        )
+    return [target_id] if target_id else []
+
+
 def enforce_coordination_access(request, token, *, locked_execution=None, resolved_issue_id=None):
     context = request.parser_context or {}
     view = context.get("view")
@@ -91,30 +128,11 @@ def enforce_coordination_access(request, token, *, locked_execution=None, resolv
         if token.user.is_bot:
             raise PermissionDenied("Agents require dispatcher or execution credentials.")
         if request.method not in SAFE_METHODS:
-            targets = [target_id] if target_id else []
-            if (
-                view_name == "IssueDetailAPIEndpoint"
-                and request.method == "PUT"
-                and not target_id
-                and isinstance(request.data, dict)
-                and request.data.get("external_id")
-                and request.data.get("external_source")
+            targets = personal_write_targets(request, resolved_issue_id=resolved_issue_id)
+            if targets and (
+                WorkItemContract.objects.filter(issue_id__in=targets).exists()
+                or RunChild.objects.filter(issue_id__in=targets).exists()
             ):
-                targets = list(
-                    Issue.objects.filter(
-                        project_id=kwargs.get("project_id"),
-                        workspace__slug=kwargs.get("slug"),
-                        external_id=request.data["external_id"],
-                        external_source=request.data["external_source"],
-                    ).values_list("id", flat=True)
-                )
-            if view_name == "BulkWorkItemAPIEndpoint":
-                updates = request.data.get("updates", [])
-                if isinstance(updates, list):
-                    targets = parsed_ids([item.get("id") for item in updates if isinstance(item, dict)])
-            if view_name == "ModuleIssueListCreateAPIEndpoint":
-                targets = parsed_ids(request.data.get("issues", []))
-            if targets and WorkItemContract.objects.filter(issue_id__in=targets).exists():
                 raise PermissionDenied("Coordinated work requires a task-run credential.")
         return
 
@@ -183,6 +201,8 @@ def enforce_coordination_access(request, token, *, locked_execution=None, resolv
             raise PermissionDenied("Execution credentials cannot rewrite actor or ownership metadata.")
         if category == "task" and request.method == "PATCH":
             require_capability(token, "task:update")
+            if "deleted_at" in request.data:
+                raise PermissionDenied("Execution credentials cannot delete work items.")
             if "parent" in request.data and (
                 target_id == run.contract.issue_id or str(request.data["parent"]) != str(run.contract.issue_id)
             ):
@@ -214,11 +234,11 @@ def enforce_coordination_access(request, token, *, locked_execution=None, resolv
     raise PermissionDenied("This operation is not part of the execution grant.")
 
 
-def guard_execution_mutation(view, request):
+def guard_coordination_mutation(view, request):
     token = request.auth
     if (
         not isinstance(token, APIToken)
-        or token.purpose != "execution"
+        or token.purpose not in ("personal", "execution")
         or request.method in SAFE_METHODS
         or getattr(view, "coordination_action", None) in ("merge", "reconcile")
     ):
@@ -226,10 +246,28 @@ def guard_execution_mutation(view, request):
     handler = getattr(view, request.method.lower(), None)
     if handler is None:
         return
+    if token.purpose == "personal" and not personal_write_targets(request):
+        return
 
     @wraps(handler)
     def guarded(request, *args, **kwargs):
         with transaction.atomic():
+            if token.purpose == "personal":
+                scope = (request.parser_context or {}).get("kwargs", {})
+                # Contract creation takes the same issue lock. Recheck after
+                # acquiring all targets, in the same order used by bulk writes.
+                list(
+                    Issue.objects.select_for_update(of=("self",))
+                    .filter(
+                        pk__in=personal_write_targets(request),
+                        project_id=scope.get("project_id"),
+                        workspace__slug=scope.get("slug"),
+                    )
+                    .order_by("id")
+                    .values_list("id", flat=True)
+                )
+                enforce_coordination_access(request, token)
+                return handler(request, *args, **kwargs)
             run = locked_run(token.project, token.agent_run_id)
             lock_execution_credential(request, run)
             request._locked_coordination_run = run
