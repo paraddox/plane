@@ -8,7 +8,7 @@ from django.utils import timezone
 from datetime import timedelta
 from uuid import uuid4
 
-from plane.db.models import Cycle, Project, ProjectMember
+from plane.db.models import Cycle, Project, ProjectMember, User
 
 
 @pytest.fixture
@@ -19,6 +19,7 @@ def project(db, workspace, create_user):
         identifier="TP",
         workspace=workspace,
         created_by=create_user,
+        cycle_view=True,
     )
     ProjectMember.objects.create(
         project=project,
@@ -68,6 +69,22 @@ class TestCycleListCreateAPIEndpoint:
     def get_cycle_url(self, workspace_slug, project_id):
         """Helper to get cycle endpoint URL"""
         return f"/api/v1/workspaces/{workspace_slug}/projects/{project_id}/cycles/"
+
+    @pytest.mark.django_db
+    def test_creation_uses_authorized_route_project(self, api_key_client, workspace, project, cycle_data):
+        other = Project.objects.create(name="Other", identifier="OTHER", workspace=workspace, cycle_view=False)
+        response = api_key_client.post(
+            self.get_cycle_url(workspace.slug, project.id), {**cycle_data, "project_id": str(other.id)}, format="json"
+        )
+        assert response.status_code == status.HTTP_201_CREATED, response.data
+        assert str(response.data["project"]) == str(project.pk)
+
+    @pytest.mark.django_db
+    def test_disabled_cycles_stay_disabled(self, api_key_client, workspace, project, cycle_data):
+        project.cycle_view = False
+        project.save(update_fields=["cycle_view"])
+        response = api_key_client.post(self.get_cycle_url(workspace.slug, project.id), cycle_data, format="json")
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
 
     @pytest.mark.django_db
     def test_create_cycle_success(self, api_key_client, workspace, project, cycle_data):
@@ -268,6 +285,34 @@ class TestCycleDetailAPIEndpoint:
     def get_cycle_detail_url(self, workspace_slug, project_id, cycle_id):
         """Helper to get cycle detail endpoint URL"""
         return f"/api/v1/workspaces/{workspace_slug}/projects/{project_id}/cycles/{cycle_id}/"
+
+    @pytest.mark.django_db
+    def test_partial_update_preserves_owner(self, api_key_client, workspace, project, create_cycle):
+        owner = User.objects.create(email="cycle-owner@example.test", username="cycle-owner")
+        ProjectMember.objects.create(project=project, member=owner, role=15)
+        create_cycle.owned_by = owner
+        create_cycle.save(update_fields=["owned_by"])
+        response = api_key_client.patch(
+            self.get_cycle_detail_url(workspace.slug, project.id, create_cycle.id), {"name": "Edited"}, format="json"
+        )
+        assert response.status_code == status.HTTP_200_OK, response.data
+        create_cycle.refresh_from_db()
+        assert create_cycle.owned_by_id == owner.pk
+
+    @pytest.mark.django_db
+    def test_completed_cycle_only_changes_sort_order(self, api_key_client, workspace, project, create_cycle):
+        original_name = create_cycle.name
+        create_cycle.end_date = timezone.now() - timedelta(days=1)
+        create_cycle.save(update_fields=["end_date"])
+        response = api_key_client.patch(
+            self.get_cycle_detail_url(workspace.slug, project.id, create_cycle.id),
+            {"sort_order": 2, "name": "Should not change"},
+            format="json",
+        )
+        assert response.status_code == status.HTTP_200_OK, response.data
+        create_cycle.refresh_from_db()
+        assert create_cycle.name == original_name
+        assert create_cycle.sort_order == 2
 
     @pytest.mark.django_db
     def test_get_cycle_success(self, api_key_client, workspace, project, create_cycle):

@@ -17,6 +17,7 @@ from rest_framework.response import Response
 from drf_spectacular.utils import OpenApiResponse, OpenApiRequest
 
 # Module imports
+from plane.utils.tasks import delay_on_commit
 from plane.api.serializers import (
     IssueSerializer,
     ModuleIssueSerializer,
@@ -226,7 +227,8 @@ class ModuleListCreateAPIEndpoint(BaseAPIView):
                 )
             serializer.save()
             # Send the model activity
-            model_activity.delay(
+            delay_on_commit(
+                model_activity,
                 model_name="module",
                 model_id=str(serializer.instance.id),
                 requested_data=request.data,
@@ -270,9 +272,9 @@ class ModuleListCreateAPIEndpoint(BaseAPIView):
         return self.paginate(
             request=request,
             queryset=(self.get_queryset().filter(archived_at__isnull=True)),
-            on_results=lambda modules: ModuleSerializer(
-                modules, many=True, fields=self.fields, expand=self.expand
-            ).data,
+            on_results=lambda modules: (
+                ModuleSerializer(modules, many=True, fields=self.fields, expand=self.expand).data
+            ),
         )
 
 
@@ -284,6 +286,18 @@ class ModuleDetailAPIEndpoint(BaseAPIView):
     serializer_class = ModuleSerializer
     webhook_event = "module"
     use_read_replica = True
+
+    def check_idempotency_permissions(self, request, slug, project_id, pk):
+        if request.method != "DELETE":
+            return
+        module = Module.all_objects.get(workspace__slug=slug, project_id=project_id, pk=pk)
+        if (
+            module.created_by_id != request.user.id
+            and not ProjectMember.objects.filter(
+                workspace__slug=slug, project_id=project_id, member=request.user, role=20, is_active=True
+            ).exists()
+        ):
+            return Response({"error": "Only admin or creator can delete the module"}, status=status.HTTP_403_FORBIDDEN)
 
     def get_queryset(self):
         return (
@@ -436,7 +450,8 @@ class ModuleDetailAPIEndpoint(BaseAPIView):
             serializer.save()
 
             # Send the model activity
-            model_activity.delay(
+            delay_on_commit(
+                model_activity,
                 model_name="module",
                 model_id=str(serializer.instance.id),
                 requested_data=request.data,
@@ -509,7 +524,8 @@ class ModuleDetailAPIEndpoint(BaseAPIView):
             )
 
         module_issues = list(ModuleIssue.objects.filter(module_id=pk).values_list("issue", flat=True))
-        issue_activity.delay(
+        delay_on_commit(
+            issue_activity,
             type="module.activity.deleted",
             requested_data=json.dumps(
                 {
@@ -711,7 +727,8 @@ class ModuleIssueListCreateAPIEndpoint(BaseAPIView):
         ModuleIssue.objects.bulk_update(records_to_update, ["module"], batch_size=10)
 
         # Capture Issue Activity
-        issue_activity.delay(
+        delay_on_commit(
+            issue_activity,
             type="module.activity.created",
             requested_data=json.dumps({"modules_list": str(issues)}),
             actor_id=str(self.request.user.id),
@@ -876,7 +893,8 @@ class ModuleIssueDetailAPIEndpoint(BaseAPIView):
 
         module_name = module_issue.module.name if module_issue.module is not None else ""
         module_issue.delete()
-        issue_activity.delay(
+        delay_on_commit(
+            issue_activity,
             type="module.activity.deleted",
             requested_data=json.dumps({"module_id": str(module_id), "issues": [str(module_issue.issue_id)]}),
             actor_id=str(request.user.id),
@@ -1012,9 +1030,9 @@ class ModuleArchiveUnarchiveAPIEndpoint(BaseAPIView):
         return self.paginate(
             request=request,
             queryset=(self.get_queryset()),
-            on_results=lambda modules: ModuleSerializer(
-                modules, many=True, fields=self.fields, expand=self.expand
-            ).data,
+            on_results=lambda modules: (
+                ModuleSerializer(modules, many=True, fields=self.fields, expand=self.expand).data
+            ),
         )
 
     @module_docs(

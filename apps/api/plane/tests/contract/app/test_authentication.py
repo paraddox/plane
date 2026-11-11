@@ -49,7 +49,7 @@ def django_client():
 
 @pytest.mark.contract
 def test_session_authentication_enforces_csrf():
-    request = APIRequestFactory().post("/api/users/me/", {})
+    request = APIRequestFactory(enforce_csrf_checks=True).post("/api/users/me/", {})
 
     with pytest.raises(PermissionDenied):
         BaseSessionAuthentication().enforce_csrf(request)
@@ -315,7 +315,7 @@ class TestMagicSignIn:
 
         # Use Django client to test the redirect flow without following redirects
         url = reverse("magic-sign-in")
-        next_path = "workspaces"
+        next_path = "/workspaces"
         response = django_client.post(
             url,
             {"email": "user@plane.so", "code": token, "next_path": next_path},

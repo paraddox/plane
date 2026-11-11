@@ -19,6 +19,7 @@ from rest_framework.response import Response
 from drf_spectacular.utils import OpenApiResponse, OpenApiRequest
 
 # Module imports
+from plane.utils.tasks import delay_on_commit
 from plane.api.serializers import (
     IntakeIssueSerializer,
     IssueSerializer,
@@ -113,9 +114,9 @@ class IntakeIssueListCreateAPIEndpoint(BaseAPIView):
         return self.paginate(
             request=request,
             queryset=(issue_queryset),
-            on_results=lambda intake_issues: IntakeIssueSerializer(
-                intake_issues, many=True, fields=self.fields, expand=self.expand
-            ).data,
+            on_results=lambda intake_issues: (
+                IntakeIssueSerializer(intake_issues, many=True, fields=self.fields, expand=self.expand).data
+            ),
         )
 
     @intake_docs(
@@ -204,7 +205,8 @@ class IntakeIssueListCreateAPIEndpoint(BaseAPIView):
             source=SourceType.IN_APP,
         )
         # Create an Issue Activity
-        issue_activity.delay(
+        delay_on_commit(
+            issue_activity,
             type="issue.activity.created",
             requested_data=json.dumps(request.data, cls=DjangoJSONEncoder),
             actor_id=str(request.user.id),
@@ -229,6 +231,28 @@ class IntakeIssueDetailAPIEndpoint(BaseAPIView):
     use_read_replica = True
 
     filterset_fields = ["status"]
+
+    def check_idempotency_permissions(self, request, slug, project_id, issue_id):
+        if request.method not in ("PATCH", "DELETE"):
+            return
+        intake_id = (
+            Intake.objects.filter(workspace__slug=slug, project_id=project_id).values_list("id", flat=True).first()
+        )
+        # DELETE replay still needs the retained creator/status metadata.
+        objects = IntakeIssue.all_objects if request.method == "DELETE" else IntakeIssue.objects
+        intake_issue = objects.get(issue_id=issue_id, workspace__slug=slug, project_id=project_id, intake_id=intake_id)
+        project_member = ProjectMember.objects.get(
+            workspace__slug=slug, project_id=project_id, member=request.user, is_active=True
+        )
+        if request.method == "PATCH":
+            if project_member.role <= 5 and str(intake_issue.created_by_id) != str(request.user.id):
+                return Response({"error": "You cannot edit intake work items"}, status=status.HTTP_400_BAD_REQUEST)
+        elif intake_issue.status in [-2, -1, 0, 2]:
+            issue = Issue.all_objects.get(workspace__slug=slug, project_id=project_id, pk=issue_id)
+            if issue.created_by_id != request.user.id and project_member.role != 20:
+                return Response(
+                    {"error": "Only admin or creator can delete the work item"}, status=status.HTTP_403_FORBIDDEN
+                )
 
     def get_queryset(self):
         intake = Intake.objects.filter(
@@ -396,7 +420,8 @@ class IntakeIssueDetailAPIEndpoint(BaseAPIView):
             current_instance = issue
             # Log all the updates
             requested_data = json.dumps(issue_data, cls=DjangoJSONEncoder)
-            issue_activity.delay(
+            delay_on_commit(
+                issue_activity,
                 type="issue.activity.updated",
                 requested_data=requested_data,
                 actor_id=str(request.user.id),
@@ -417,7 +442,8 @@ class IntakeIssueDetailAPIEndpoint(BaseAPIView):
             intake_serializer.save()
 
             # create a activity for status change
-            issue_activity.delay(
+            delay_on_commit(
+                issue_activity,
                 type="intake.activity.created",
                 requested_data=json.dumps(request.data, cls=DjangoJSONEncoder),
                 actor_id=str(request.user.id),

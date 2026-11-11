@@ -15,6 +15,7 @@ from rest_framework.response import Response
 from drf_spectacular.utils import OpenApiExample, OpenApiRequest
 
 # Module Imports
+from plane.utils.tasks import delay_on_commit
 from plane.bgtasks.storage_metadata_task import get_asset_object_metadata
 from plane.settings.storage import S3Storage
 from plane.utils.path_validator import sanitize_filename
@@ -213,7 +214,7 @@ class UserAssetEndpoint(BaseAPIView):
         asset.is_uploaded = True
         # get the storage metadata
         if not asset.storage_metadata:
-            get_asset_object_metadata.delay(asset_id=str(asset_id))
+            delay_on_commit(get_asset_object_metadata, asset_id=str(asset_id))
         # update the attributes
         asset.attributes = request.data.get("attributes", asset.attributes)
         # save the asset
@@ -369,7 +370,7 @@ class UserServerAssetEndpoint(BaseAPIView):
         asset.is_uploaded = True
         # get the storage metadata
         if not asset.storage_metadata:
-            get_asset_object_metadata.delay(asset_id=str(asset_id))
+            delay_on_commit(get_asset_object_metadata, asset_id=str(asset_id))
         # update the attributes
         asset.attributes = request.data.get("attributes", asset.attributes)
         # save the asset
@@ -609,7 +610,7 @@ class GenericAssetEndpoint(BaseAPIView):
 
             # Update storage metadata if not present
             if not asset.storage_metadata:
-                get_asset_object_metadata.delay(asset_id=str(asset_id))
+                delay_on_commit(get_asset_object_metadata, asset_id=str(asset_id))
 
             asset.save(update_fields=["is_uploaded"])
 

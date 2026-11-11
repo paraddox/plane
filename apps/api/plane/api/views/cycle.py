@@ -24,6 +24,7 @@ from rest_framework.response import Response
 from drf_spectacular.utils import OpenApiRequest, OpenApiResponse
 
 # Module imports
+from plane.utils.tasks import delay_on_commit
 from plane.api.serializers import (
     CycleIssueSerializer,
     CycleSerializer,
@@ -215,13 +216,15 @@ class CycleListCreateAPIEndpoint(BaseAPIView):
             return self.paginate(
                 request=request,
                 queryset=(queryset),
-                on_results=lambda cycles: CycleSerializer(
-                    cycles,
-                    many=True,
-                    fields=self.fields,
-                    expand=self.expand,
-                    context={"project": project},
-                ).data,
+                on_results=lambda cycles: (
+                    CycleSerializer(
+                        cycles,
+                        many=True,
+                        fields=self.fields,
+                        expand=self.expand,
+                        context={"project": project},
+                    ).data
+                ),
             )
 
         # Completed Cycles
@@ -230,13 +233,15 @@ class CycleListCreateAPIEndpoint(BaseAPIView):
             return self.paginate(
                 request=request,
                 queryset=(queryset),
-                on_results=lambda cycles: CycleSerializer(
-                    cycles,
-                    many=True,
-                    fields=self.fields,
-                    expand=self.expand,
-                    context={"project": project},
-                ).data,
+                on_results=lambda cycles: (
+                    CycleSerializer(
+                        cycles,
+                        many=True,
+                        fields=self.fields,
+                        expand=self.expand,
+                        context={"project": project},
+                    ).data
+                ),
             )
 
         # Draft Cycles
@@ -245,13 +250,15 @@ class CycleListCreateAPIEndpoint(BaseAPIView):
             return self.paginate(
                 request=request,
                 queryset=(queryset),
-                on_results=lambda cycles: CycleSerializer(
-                    cycles,
-                    many=True,
-                    fields=self.fields,
-                    expand=self.expand,
-                    context={"project": project},
-                ).data,
+                on_results=lambda cycles: (
+                    CycleSerializer(
+                        cycles,
+                        many=True,
+                        fields=self.fields,
+                        expand=self.expand,
+                        context={"project": project},
+                    ).data
+                ),
             )
 
         # Incomplete Cycles
@@ -260,24 +267,28 @@ class CycleListCreateAPIEndpoint(BaseAPIView):
             return self.paginate(
                 request=request,
                 queryset=(queryset),
-                on_results=lambda cycles: CycleSerializer(
+                on_results=lambda cycles: (
+                    CycleSerializer(
+                        cycles,
+                        many=True,
+                        fields=self.fields,
+                        expand=self.expand,
+                        context={"project": project},
+                    ).data
+                ),
+            )
+        return self.paginate(
+            request=request,
+            queryset=(queryset),
+            on_results=lambda cycles: (
+                CycleSerializer(
                     cycles,
                     many=True,
                     fields=self.fields,
                     expand=self.expand,
                     context={"project": project},
-                ).data,
-            )
-        return self.paginate(
-            request=request,
-            queryset=(queryset),
-            on_results=lambda cycles: CycleSerializer(
-                cycles,
-                many=True,
-                fields=self.fields,
-                expand=self.expand,
-                context={"project": project},
-            ).data,
+                ).data
+            ),
         )
 
     @cycle_docs(
@@ -305,7 +316,8 @@ class CycleListCreateAPIEndpoint(BaseAPIView):
         if (request.data.get("start_date", None) is None and request.data.get("end_date", None) is None) or (
             request.data.get("start_date", None) is not None and request.data.get("end_date", None) is not None
         ):
-            serializer = CycleCreateSerializer(data=request.data, context={"request": request})
+            project = Project.objects.get(pk=project_id, workspace__slug=slug)
+            serializer = CycleCreateSerializer(data=request.data, context={"request": request, "project": project})
             if serializer.is_valid():
                 if (
                     request.data.get("external_id")
@@ -332,7 +344,8 @@ class CycleListCreateAPIEndpoint(BaseAPIView):
                     )
                 serializer.save(project_id=project_id)
                 # Send the model activity
-                model_activity.delay(
+                delay_on_commit(
+                    model_activity,
                     model_name="cycle",
                     model_id=str(serializer.instance.id),
                     requested_data=request.data,
@@ -363,6 +376,18 @@ class CycleDetailAPIEndpoint(BaseAPIView):
     webhook_event = "cycle"
     permission_classes = [ProjectEntityPermission]
     use_read_replica = True
+
+    def check_idempotency_permissions(self, request, slug, project_id, pk):
+        if request.method != "DELETE":
+            return
+        cycle = Cycle.all_objects.get(workspace__slug=slug, project_id=project_id, pk=pk)
+        if (
+            cycle.owned_by_id != request.user.id
+            and not ProjectMember.objects.filter(
+                workspace__slug=slug, project_id=project_id, member=request.user, role=20, is_active=True
+            ).exists()
+        ):
+            return Response({"error": "Only admin or creator can delete the cycle"}, status=status.HTTP_403_FORBIDDEN)
 
     def get_queryset(self):
         return (
@@ -516,7 +541,9 @@ class CycleDetailAPIEndpoint(BaseAPIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-        serializer = CycleUpdateSerializer(cycle, data=request.data, partial=True, context={"request": request})
+        serializer = CycleUpdateSerializer(
+            cycle, data=request_data, partial=True, context={"request": request, "project": cycle.project}
+        )
         if serializer.is_valid():
             if (
                 request.data.get("external_id")
@@ -538,7 +565,8 @@ class CycleDetailAPIEndpoint(BaseAPIView):
             serializer.save()
 
             # Send the model activity
-            model_activity.delay(
+            delay_on_commit(
+                model_activity,
                 model_name="cycle",
                 model_id=str(serializer.instance.id),
                 requested_data=request.data,
@@ -583,7 +611,8 @@ class CycleDetailAPIEndpoint(BaseAPIView):
 
         cycle_issues = list(CycleIssue.objects.filter(cycle_id=self.kwargs.get("pk")).values_list("issue", flat=True))
 
-        issue_activity.delay(
+        delay_on_commit(
+            issue_activity,
             type="cycle.activity.deleted",
             requested_data=json.dumps(
                 {
@@ -979,7 +1008,8 @@ class CycleIssueListCreateAPIEndpoint(BaseAPIView):
         CycleIssue.objects.bulk_update(updated_records, ["cycle_id"], batch_size=100)
 
         # Capture Issue Activity
-        issue_activity.delay(
+        delay_on_commit(
+            issue_activity,
             type="cycle.activity.created",
             requested_data=json.dumps({"cycles_list": issues}),
             actor_id=str(self.request.user.id),
@@ -1089,7 +1119,8 @@ class CycleIssueDetailAPIEndpoint(BaseAPIView):
         )
         issue_id = cycle_issue.issue_id
         cycle_issue.delete()
-        issue_activity.delay(
+        delay_on_commit(
+            issue_activity,
             type="cycle.activity.deleted",
             requested_data=json.dumps(
                 {

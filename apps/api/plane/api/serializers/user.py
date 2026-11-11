@@ -3,6 +3,7 @@
 # See the LICENSE file for details.
 
 from rest_framework import serializers
+from drf_spectacular.utils import extend_schema_serializer
 
 # Module imports
 from plane.db.models import User
@@ -10,6 +11,7 @@ from plane.db.models import User
 from .base import BaseSerializer
 
 
+@extend_schema_serializer(component_name="APIUserLite")
 class UserLiteSerializer(BaseSerializer):
     """
     Lightweight user serializer for minimal data transfer.

@@ -3,6 +3,7 @@
 # See the LICENSE file for details.
 
 # Python imports
+import hashlib
 from uuid import uuid4
 
 # Django imports
@@ -20,6 +21,16 @@ def generate_token():
     return "plane_api_" + uuid4().hex
 
 
+def default_api_token_scopes():
+    return ["read", "write"]
+
+
+def hash_api_token(token):
+    if token.startswith("sha256$"):
+        return token
+    return "sha256$" + hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
 class APIToken(BaseModel):
     # Meta information
     label = models.CharField(max_length=255, default=generate_label_token)
@@ -34,9 +45,13 @@ class APIToken(BaseModel):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="bot_tokens")
     user_type = models.PositiveSmallIntegerField(choices=((0, "Human"), (1, "Bot")), default=0)
     workspace = models.ForeignKey("db.Workspace", related_name="api_tokens", on_delete=models.CASCADE, null=True)
+    project = models.ForeignKey(
+        "db.Project", related_name="api_tokens", on_delete=models.CASCADE, null=True, blank=True
+    )
+    scopes = models.JSONField(default=default_api_token_scopes)
     expired_at = models.DateTimeField(blank=True, null=True)
     is_service = models.BooleanField(default=False)
-    allowed_rate_limit = models.CharField(max_length=255, default="60/min")
+    allowed_rate_limit = models.CharField(max_length=255, default="", blank=True)
 
     class Meta:
         verbose_name = "API Token"
@@ -46,6 +61,10 @@ class APIToken(BaseModel):
 
     def __str__(self):
         return str(self.user.id)
+
+    def save(self, *args, **kwargs):
+        self.token = hash_api_token(self.token)
+        return super().save(*args, **kwargs)
 
 
 class APIActivityLog(BaseModel):

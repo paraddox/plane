@@ -18,5 +18,8 @@ export interface IApiToken {
   user: string;
   user_type: number;
   token?: string;
-  workspace: string;
+  workspace: string | null;
+  project?: string | null;
+  scopes?: ("read" | "write")[];
+  allowed_rate_limit?: string;
 }

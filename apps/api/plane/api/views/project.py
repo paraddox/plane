@@ -13,13 +13,14 @@ from django.utils import timezone
 from django.core.serializers.json import DjangoJSONEncoder
 
 # Third party imports
-from rest_framework import status
+from rest_framework import serializers, status
 from rest_framework.response import Response
 from rest_framework.serializers import ValidationError
 from drf_spectacular.utils import OpenApiResponse, OpenApiRequest
 
 
 # Module imports
+from plane.utils.tasks import delay_on_commit
 from plane.db.models import (
     Cycle,
     Intake,
@@ -256,7 +257,8 @@ class ProjectListCreateAPIEndpoint(BaseAPIView):
                 project = self.get_queryset().filter(pk=serializer.instance.id).first()
 
                 # Model activity
-                model_activity.delay(
+                delay_on_commit(
+                    model_activity,
                     model_name="project",
                     model_id=str(project.id),
                     requested_data=request.data,
@@ -439,7 +441,8 @@ class ProjectDetailAPIEndpoint(BaseAPIView):
 
                 project = self.get_queryset().filter(pk=serializer.instance.id).first()
 
-                model_activity.delay(
+                delay_on_commit(
+                    model_activity,
                     model_name="project",
                     model_id=str(project.id),
                     requested_data=request.data,
@@ -487,7 +490,8 @@ class ProjectDetailAPIEndpoint(BaseAPIView):
         # Delete the user favorite cycle
         UserFavorite.objects.filter(entity_type="project", entity_identifier=pk, project_id=pk).delete()
         project.delete()
-        webhook_activity.delay(
+        delay_on_commit(
+            webhook_activity,
             event="project",
             verb="deleted",
             field=None,
@@ -568,7 +572,15 @@ ALLOWED_PROJECT_SUMMARY_FIELDS = [
 ]
 
 
+class ProjectSummarySerializer(serializers.Serializer):
+    id = serializers.UUIDField()
+    name = serializers.CharField()
+    identifier = serializers.CharField()
+    counts = serializers.DictField(child=serializers.IntegerField())
+
+
 class ProjectSummaryAPIEndpoint(BaseAPIView):
+    serializer_class = ProjectSummarySerializer
     permission_classes = [WorkSpaceAdminPermission]
     use_read_replica = True
 

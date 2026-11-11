@@ -139,6 +139,8 @@ class UserMeSettingsSerializer(BaseSerializer):
 
 
 class UserLiteSerializer(BaseSerializer):
+    avatar_url = serializers.CharField(read_only=True, allow_null=True)
+
     class Meta:
         model = User
         fields = [
