@@ -5,7 +5,7 @@
 from datetime import timedelta
 
 import pytest
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, OperationalError, connection, transaction
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -343,6 +343,90 @@ def test_completion_cannot_be_bypassed_by_bulk_orm_or_reclassifying_state(merge_
     url = f"/api/workspaces/{project.workspace.slug}/projects/{project.pk}/issues/{issue.pk}/"
     assert human.patch(url, {"state": str(done.pk)}, format="json").status_code == 400
     assert not provider.merge_calls
+
+
+def completed_required_child(flow):
+    execution, agent, run_id, _, _, _, _ = flow
+    _, _, project, issue, _, _, _, _, _, prefix = execution
+    state = State.objects.create(project=project, name="Child accepted", group="completed", color="#00aa00")
+    child = agent.post(
+        prefix + f"work-items/{issue.pk}/children/",
+        {
+            "name": "Required child",
+            "requirements": "Focused implementation",
+            "definition_of_done": [{"description": "Child tests pass"}],
+        },
+        format="json",
+    )
+    assert child.status_code == 201, child.data
+    url = f"/api/v1/workspaces/{project.workspace.slug}/projects/{project.pk}/work-items/{child.data['issue']}/"
+    assert agent.patch(url, {"state": str(state.pk)}, format="json").status_code == 200
+    evidence = agent.post(
+        prefix + f"runs/{run_id}/evidence/",
+        {
+            "head_sha": "a" * 40,
+            "kind": "test",
+            "outcome": "passed",
+            "summary": "Child acceptance passed",
+            "criterion_ids": [child.data["definition_of_done"][0]["id"]],
+        },
+        format="json",
+    )
+    assert evidence.status_code == 201, evidence.data
+    return state
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("change", ["group", "deleted_at"])
+def test_required_child_state_is_fenced_until_merge_confirmation(merge_flow, change):
+    execution, agent, run_id, provider, done, _, _ = merge_flow
+    dispatcher, _, project, _, _, _, _, _, _, prefix = execution
+    child_state = completed_required_child(merge_flow)
+    advance(merge_flow)
+    provider.failure = ProviderUnavailable()
+    assert agent.post(prefix + f"runs/{run_id}/merge/", MERGE_INPUT, format="json").status_code == 202
+    assert MergeAttempt.objects.get(run_id=run_id).completion_state_id == done.pk != child_state.pk
+    unrelated = State.objects.create(project=project, name="Unrelated", group="completed", color="#777777")
+    State.objects.filter(pk=unrelated.pk).update(group="started")
+    State.objects.filter(pk=child_state.pk).update(name="Child accepted, renamed")
+    changes = {"group": "started"} if change == "group" else {"deleted_at": timezone.now()}
+    with pytest.raises(IntegrityError, match="outstanding coordinated merge"), transaction.atomic():
+        State.objects.filter(pk=child_state.pk).update(**changes)
+    child_state.refresh_from_db()
+    assert child_state.group == "completed" and child_state.deleted_at is None
+    provider.merged = True
+    assert dispatcher.post(prefix + f"runs/{run_id}/reconcile/", {}, format="json").status_code == 200
+    State.objects.filter(pk=child_state.pk).update(**changes)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_merge_admission_locks_required_child_state_before_checking_gates(merge_flow, monkeypatch):
+    execution, agent, run_id, provider, _, _, _ = merge_flow
+    *_, prefix = execution
+    child_state = completed_required_child(merge_flow)
+    advance(merge_flow)
+    target_status = provider.target_status
+    inspected, locked = False, False
+
+    def inspect_state_lock(base, sha):
+        nonlocal inspected, locked
+        if not inspected:
+            inspected = True
+            probe = connection.copy(alias="coordination-child-state-probe")
+            try:
+                with probe.cursor() as cursor:
+                    cursor.execute("SELECT id FROM states WHERE id = %s FOR UPDATE NOWAIT", [child_state.pk])
+            except OperationalError as error:
+                assert error.__cause__.sqlstate == "55P03"
+                locked = True
+            finally:
+                probe.close()
+        return target_status(base, sha)
+
+    monkeypatch.setattr(provider, "target_status", inspect_state_lock)
+    provider.failure = MergeRejected()
+    assert agent.post(prefix + f"runs/{run_id}/merge/", MERGE_INPUT, format="json").status_code == 409
+    assert inspected and locked
 
 
 @pytest.mark.django_db(transaction=True)

@@ -215,6 +215,67 @@ def test_personal_key_cannot_mutate_coordinated_task_or_claim_a_run(execution, a
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("idempotent", [False, True])
+def test_personal_upsert_cannot_update_a_coordinated_task(execution, api_key_client, idempotent):
+    _, _, project, issue, _, _, _, _, _, _ = execution
+    Issue.objects.filter(pk=issue.pk).update(external_id="product-task", external_source="integration")
+    url = f"/api/v1/workspaces/{project.workspace.slug}/projects/{project.pk}/work-items/upsert/"
+    headers = {"HTTP_IDEMPOTENCY_KEY": "coordinated-upsert"} if idempotent else {}
+    response = api_key_client.put(
+        url,
+        {"external_id": "product-task", "external_source": "integration", "name": "Unauthorized update"},
+        format="json",
+        **headers,
+    )
+    assert response.status_code == 403, response.data
+    issue.refresh_from_db()
+    assert issue.name == "Product task"
+
+
+@pytest.mark.django_db
+def test_personal_upsert_replay_is_denied_after_a_contract_is_added(execution, api_key_client):
+    _, _, project, _, contract, _, _, _, _, _ = execution
+    url = f"/api/v1/workspaces/{project.workspace.slug}/projects/{project.pk}/work-items/upsert/"
+    payload = {"external_id": "ordinary-task", "external_source": "integration", "name": "Imported"}
+    created = api_key_client.put(url, payload, format="json")
+    assert created.status_code == 201, created.data
+    payload["name"] = "Synced"
+    headers = {"HTTP_IDEMPOTENCY_KEY": "ordinary-upsert"}
+    updated = api_key_client.put(url, payload, format="json", **headers)
+    assert updated.status_code == 200, updated.data
+    WorkItemContract.objects.create(project=project, issue_id=created.data["id"], owner=contract.owner)
+    replay = api_key_client.put(url, payload, format="json", **headers)
+    assert replay.status_code == 403, replay.data
+    assert Issue.objects.get(pk=created.data["id"]).name == "Synced"
+
+
+@pytest.mark.django_db
+def test_personal_upsert_rechecks_a_contract_added_after_authentication(execution, api_key_client, monkeypatch):
+    from plane.api.middleware.api_authentication import APIKeyAuthentication
+
+    _, _, project, _, contract, _, _, _, _, _ = execution
+    issue = Issue.objects.create(
+        project=project, name="Original", external_id="new-contract", external_source="integration"
+    )
+    record_usage = APIKeyAuthentication.record_usage
+
+    def add_contract(self, token):
+        record_usage(self, token)
+        WorkItemContract.objects.create(project=project, issue=issue, owner=contract.owner)
+
+    monkeypatch.setattr(APIKeyAuthentication, "record_usage", add_contract)
+    url = f"/api/v1/workspaces/{project.workspace.slug}/projects/{project.pk}/work-items/upsert/"
+    response = api_key_client.put(
+        url,
+        {"external_id": issue.external_id, "external_source": issue.external_source, "name": "Unauthorized"},
+        format="json",
+    )
+    assert response.status_code == 403, response.data
+    issue.refresh_from_db()
+    assert issue.name == "Original"
+
+
+@pytest.mark.django_db
 def test_credential_issuance_does_not_cache_plaintext_secrets(execution):
     dispatcher, _, _, _, _, _, _, _, _, prefix = execution
     run_id = claim(execution)

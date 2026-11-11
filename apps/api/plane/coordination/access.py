@@ -9,7 +9,7 @@ from django.db import transaction
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import SAFE_METHODS
 
-from plane.db.models import APIToken, AgentRun, FileAsset, RunTarget, WorkItemContract
+from plane.db.models import APIToken, AgentRun, FileAsset, Issue, RunTarget, WorkItemContract
 from .execution import lock_execution_credential, locked_run, require_agent_access, validate_live_run
 
 
@@ -78,20 +78,36 @@ def require_targets(run, identifiers):
         raise PermissionDenied("This execution is not authorized for those work items.")
 
 
-def enforce_coordination_access(request, token, *, locked_execution=None):
+def enforce_coordination_access(request, token, *, locked_execution=None, resolved_issue_id=None):
     context = request.parser_context or {}
     view = context.get("view")
     kwargs = context.get("kwargs", {})
     action = getattr(view, "coordination_action", None)
     view_name = view.__class__.__name__ if view else ""
     target_field, category = TASK_VIEWS.get(view_name, ("issue_id", None))
-    target_id = kwargs.get(target_field)
+    target_id = resolved_issue_id or kwargs.get(target_field)
 
     if token.purpose == "personal":
         if token.user.is_bot:
             raise PermissionDenied("Agents require dispatcher or execution credentials.")
         if request.method not in SAFE_METHODS:
             targets = [target_id] if target_id else []
+            if (
+                view_name == "IssueDetailAPIEndpoint"
+                and request.method == "PUT"
+                and not target_id
+                and isinstance(request.data, dict)
+                and request.data.get("external_id")
+                and request.data.get("external_source")
+            ):
+                targets = list(
+                    Issue.objects.filter(
+                        project_id=kwargs.get("project_id"),
+                        workspace__slug=kwargs.get("slug"),
+                        external_id=request.data["external_id"],
+                        external_source=request.data["external_source"],
+                    ).values_list("id", flat=True)
+                )
             if view_name == "BulkWorkItemAPIEndpoint":
                 updates = request.data.get("updates", [])
                 if isinstance(updates, list):

@@ -158,6 +158,7 @@ from plane.utils.openapi import (
 )
 from plane.bgtasks.work_item_link_task import crawl_work_item_link_title
 from plane.utils.tasks import delay_on_commit as enqueue_work_item_task
+from plane.coordination.access import enforce_coordination_access
 
 
 def work_item_etag(issue):
@@ -698,6 +699,7 @@ class IssueDetailAPIEndpoint(BaseAPIView):
                     external_id=external_id,
                     external_source=external_source,
                 )
+                enforce_coordination_access(request, request.auth, resolved_issue_id=issue.pk)
                 check_work_item_precondition(request.headers.get("If-Match"), issue)
 
                 # Get the current instance of the issue in order to track

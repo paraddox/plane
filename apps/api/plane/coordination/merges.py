@@ -71,13 +71,28 @@ def prepare_merge(request, project, run_id, expected):
             or expected["head_sha"] != run.head_sha
         ):
             raise CoordinationConflict("The merge request does not match the current specification and code revision.")
-        list(
+        children = list(
             Issue.objects.select_for_update()
             .filter(
                 id__in=run.contract.children.filter(spec_revision=run.spec_revision, required=True).values("issue_id"),
             )
             .order_by("id")
         )
+        done = State.objects.filter(project=project, group="completed").order_by("sequence", "id").first()
+        if not done:
+            raise ValidationError("Configure a completed state for this project before merging.")
+        # Freeze every state used by the gates until the merge fence commits.
+        # Lock together in UUID order to avoid cross-run lock-order inversions.
+        state_ids = {child.state_id for child in children} | {done.pk}
+        states = {
+            state.pk: state
+            for state in State.all_state_objects.select_for_update()
+            .filter(project=project, pk__in=state_ids)
+            .order_by("id")
+        }
+        done = states.get(done.pk)
+        if not done or done.group != "completed" or done.deleted_at:
+            raise CoordinationConflict("The completed state changed. Refresh and retry.")
         authorization = check_task_gates(run)
         repositories = execution_policy(project).repositories
         repository = next(
@@ -92,14 +107,6 @@ def prepare_merge(request, project, run_id, expected):
             raise CoordinationConflict("This repository and base are no longer allowed by project policy.")
         if repository.get("merge_method", "merge") != "merge":
             raise ValidationError("Guarded target-branch delivery requires merge commits.")
-        done = (
-            State.objects.select_for_update()
-            .filter(project=project, group="completed")
-            .order_by("sequence", "id")
-            .first()
-        )
-        if not done:
-            raise ValidationError("Configure a completed state for this project before merging.")
         provider = GitHubClient(project.pk, run.repository)
         confirmation = provider.target_status(run.base_branch, run.head_sha)
         if not pending or not confirmation["merged"]:
