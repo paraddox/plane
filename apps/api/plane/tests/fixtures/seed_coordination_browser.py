@@ -7,6 +7,7 @@ def seed():
     import json
     import os
     import secrets
+    from datetime import timedelta
     from pathlib import Path
     from tempfile import gettempdir
 
@@ -20,6 +21,7 @@ def seed():
         WorkspaceUserProperties,
         Project,
         ProjectMember,
+        ProjectExecutionPolicy,
         State,
         Issue,
         Module,
@@ -82,6 +84,21 @@ def seed():
         defaults={"name": "Agent Coordination", "created_by": owner, "project_lead": owner},
     )
     ProjectMember.objects.get_or_create(project=project, member=owner, defaults={"role": 20})
+    second_project, _ = Project.objects.get_or_create(
+        workspace=workspace,
+        identifier="OTHER",
+        defaults={"name": "Second Coordination Project", "created_by": owner, "project_lead": owner},
+    )
+    ProjectMember.objects.get_or_create(project=second_project, member=owner, defaults={"role": 20})
+    ProjectExecutionPolicy.objects.update_or_create(
+        project=second_project,
+        defaults={
+            "enabled": True,
+            "repositories": [{"repository": "example/second", "base_branch": "develop", "required_checks": []}],
+            "credential_lifetime": timedelta(minutes=10),
+            "execution_lease": timedelta(minutes=20),
+        },
+    )
     for name, group in (("Todo", "unstarted"), ("In Progress", "started"), ("Done", "completed")):
         State.objects.get_or_create(
             project=project, name=name, defaults={"group": group, "color": "#777777", "default": group == "unstarted"}
@@ -146,6 +163,7 @@ def seed():
     fixture = {
         "workspace": workspace.slug,
         "project": str(project.pk),
+        "second_project": str(second_project.pk),
         "issue": str(issue.pk),
         "owner": str(owner.pk),
         "reviewer": str(reviewer.pk),

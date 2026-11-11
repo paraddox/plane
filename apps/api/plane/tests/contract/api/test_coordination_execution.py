@@ -17,8 +17,11 @@ from plane.db.models import (
     AgentProjectAccess,
     AgentRun,
     APIToken,
+    Cycle,
+    CycleIssue,
     FileAsset,
     Issue,
+    IssueRelation,
     Module,
     ProjectExecutionPolicy,
     ProjectMember,
@@ -201,6 +204,98 @@ def test_personal_mutations_recheck_contracts_added_after_authentication(
     saved = Issue.all_objects.get(pk=protected.pk)
     assert saved.name == "Newly coordinated" and saved.deleted_at is None
     assert Issue.objects.get(pk=first.pk).name == "First ordinary"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("target", ["root", "child"])
+@pytest.mark.parametrize("method", ["patch", "delete"])
+def test_attachment_mutations_require_matching_issue_ids(execution, execution_child, api_key_client, target, method):
+    _, _, project, root, contract, _, _, _, _, _ = execution
+    _, _, child = execution_child
+    protected = root if target == "root" else child
+    ordinary = Issue.objects.create(project=project, name="Ordinary attachment owner")
+    assets = []
+    for issue, name in ((protected, "protected.txt"), (ordinary, "ordinary.txt")):
+        asset = FileAsset(
+            project=project,
+            workspace=project.workspace,
+            issue=issue,
+            asset=f"synthetic/{name}",
+            attributes={"name": name},
+            storage_metadata={"synthetic": True},
+            is_uploaded=method == "delete",
+            created_by=contract.owner,
+        )
+        asset.save(disable_auto_set_user=True)
+        assets.append(asset)
+    protected_asset, allowed_asset = assets
+    base = f"/api/v1/workspaces/{project.workspace.slug}/projects/{project.pk}/work-items/{ordinary.pk}/attachments/"
+    response = getattr(api_key_client, method)(base + f"{protected_asset.pk}/", {}, format="json")
+    assert response.status_code == 404, getattr(response, "data", None)
+    saved = FileAsset.all_objects.get(pk=protected_asset.pk)
+    assert saved.deleted_at is None and not saved.is_deleted
+    assert saved.is_uploaded == (method == "delete")
+    assert saved.created_by_id == contract.owner_id
+    permitted = getattr(api_key_client, method)(base + f"{allowed_asset.pk}/", {}, format="json")
+    assert permitted.status_code == 204, getattr(permitted, "data", None)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("target", ["root", "child"])
+@pytest.mark.parametrize("action", ["cycle", "relation", "reverse_relation"])
+def test_body_selected_coordinated_targets_are_protected(execution, execution_child, api_key_client, target, action):
+    _, _, project, root, contract, _, _, _, _, _ = execution
+    _, _, child = execution_child
+    protected = root if target == "root" else child
+    origin = Issue.objects.create(project=project, name="Ordinary origin")
+    ordinary = Issue.objects.create(project=project, name="Ordinary target")
+    base = f"/api/v1/workspaces/{project.workspace.slug}/projects/{project.pk}/"
+    if action == "cycle":
+        cycle = Cycle.objects.create(project=project, name="Cycle", owned_by=contract.owner)
+        url = base + f"cycles/{cycle.pk}/cycle-issues/"
+        payload = {"issues": [str(ordinary.pk), str(protected.pk)]}
+    else:
+        url = base + f"work-items/{origin.pk}/relations/"
+        payload = {
+            "relation_type": "blocking" if action == "reverse_relation" else "relates_to",
+            "issues": [str(ordinary.pk), str(protected.pk)],
+        }
+    response = api_key_client.post(url, payload, format="json")
+    assert response.status_code == 403, response.data
+    assert not CycleIssue.objects.filter(project=project).exists()
+    assert not IssueRelation.objects.filter(project=project).exists()
+    payload["issues"] = [str(ordinary.pk)]
+    permitted = api_key_client.post(url, payload, format="json")
+    assert permitted.status_code == (200 if action == "cycle" else 201), permitted.data
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("action", ["cycle", "relation"])
+def test_body_selected_targets_are_rechecked_after_authentication(execution, api_key_client, monkeypatch, action):
+    from plane.api.middleware.api_authentication import APIKeyAuthentication
+
+    _, _, project, _, owner_contract, _, _, _, _, _ = execution
+    origin = Issue.objects.create(project=project, name="Ordinary origin")
+    protected = Issue.objects.create(project=project, name="Newly coordinated")
+    base = f"/api/v1/workspaces/{project.workspace.slug}/projects/{project.pk}/"
+    if action == "cycle":
+        cycle = Cycle.objects.create(project=project, name="Cycle", owned_by=owner_contract.owner)
+        url = base + f"cycles/{cycle.pk}/cycle-issues/"
+        payload = {"issues": [str(protected.pk)]}
+    else:
+        url = base + f"work-items/{origin.pk}/relations/"
+        payload = {"relation_type": "relates_to", "issues": [str(protected.pk)]}
+    record_usage = APIKeyAuthentication.record_usage
+
+    def add_contract(self, token):
+        record_usage(self, token)
+        WorkItemContract.objects.create(project=project, issue=protected, owner=owner_contract.owner)
+
+    monkeypatch.setattr(APIKeyAuthentication, "record_usage", add_contract)
+    response = api_key_client.post(url, payload, format="json")
+    assert response.status_code == 403, response.data
+    assert not CycleIssue.objects.filter(project=project).exists()
+    assert not IssueRelation.objects.filter(project=project).exists()
 
 
 @pytest.mark.django_db

@@ -364,7 +364,7 @@ COORDINATION_FIXTURE=/private/tmp/plane-coordination-fixture.json \
   'from plane.tests.fixtures.seed_coordination_browser import seed; seed()'
 ```
 
-This creates synthetic accounts and a fresh task. It writes private fixture/login
+This creates synthetic accounts, two projects, and a fresh task. It writes private fixture/login
 files, never prints raw credentials, and resets the synthetic owner's password;
 previous fixture sessions become invalid. Start the web app at `127.0.0.1:3000`
 with `VITE_API_BASE_URL=http://127.0.0.1:8000` and the API at `127.0.0.1:8000`.
@@ -375,6 +375,16 @@ Then, from the repository root with Playwright available:
 COORDINATION_FIXTURE=/private/tmp/plane-coordination-fixture.json \
 COORDINATION_BROWSER_OUTPUT=/private/tmp/plane-coordination-browser \
   node apps/web/tests/coordination.browser.mjs
+```
+
+The same fixture supports a focused settings regression: it makes unsaved edits,
+navigates between cached projects without reloading the SPA, and checks that
+policy values and release drafts reset before saving the destination project.
+
+```sh
+COORDINATION_FIXTURE=/private/tmp/plane-coordination-fixture.json \
+COORDINATION_BROWSER_OUTPUT=/private/tmp/plane-coordination-policy-browser \
+  node apps/web/tests/coordination-policy.browser.mjs
 ```
 
 `PLAYWRIGHT_MODULE` may point to an existing Playwright installation; the browser

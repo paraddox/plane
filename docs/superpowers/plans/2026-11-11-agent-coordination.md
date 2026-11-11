@@ -170,7 +170,7 @@ creation surfaces, project settings/releases, shared services/types, docs.
 
 ## Final Evidence
 
-- 385 backend API/authentication/security/coordination tests passed with actual
+- 397 backend API/authentication/security/coordination tests passed with actual
   PostgreSQL migrations and Valkey, including the real-HTTP GitHub fixture and
   concurrent claim/credential/revocation checks. Schema validation is included.
 - Main migration 0122 upgraded through 0130 with existing tasks and hashed keys
@@ -190,9 +190,9 @@ creation surfaces, project settings/releases, shared services/types, docs.
   deleted, and unresolved merge history cannot be erased by deletion.
 - Local UI: http://127.0.0.1:3000. API: http://127.0.0.1:8000. The disposable
   fixture's synthetic login is in `/private/tmp/plane-coordination-login.txt`.
-  These URLs/login describe the initial browser verification. The subsequent
-  Docker recovery recreated the disposable database; reseed the demo before
-  reusing that login, following `docs/agent-coordination.md`.
+  The disposable database was migrated and reseeded after Docker recovery during
+  the settings-navigation regression verification. The private fixture/login
+  files now describe that restored demo.
 
 Limits: GitHub write behavior is verified with HTTP fixtures, not a live App
 installation; operator-specific repository protections require staging validation
@@ -267,6 +267,29 @@ regression cases, fixed, and verified:
 All 13 regressions passed after the fixes; the full relevant API/auth/security
 suite passed 385 tests with actual migrations. Scoped Ruff lint/format and diff
 checks passed. No model or migration changes were needed for these findings.
+
+### Attachment, Body Target, and Settings Isolation
+
+The latest three findings were reproduced before their fixes:
+
+- Attachment detail lookups now bind the asset to the URL's issue as well as its
+  workspace and project. An ordinary issue URL cannot confirm or delete a
+  coordinated root/child attachment by substituting its asset ID.
+- Personal-key cycle and relation writes include every body-selected task in
+  the shared authorization and locked recheck. Mixed ordinary/protected targets
+  are denied without partial writes; ordinary-only operations still succeed.
+- Project settings remount by workspace/project identity. Unsaved policy values
+  and release drafts cannot carry across cached SPA navigation into another
+  project's save request.
+
+All 12 new backend regression cases failed before the fixes and passed after
+them, including post-authentication contract creation. The full relevant suite
+passed 397 tests with actual PostgreSQL migrations and Valkey. The focused
+two-project browser regression reproduced the original state leak, then passed
+with desktop/mobile screenshots inspected and no unexpected page errors beyond
+10 known app-shell hydration warnings. Web type checking, 2 frontend helper
+tests, scoped Ruff/OxLint/format checks, and diff checks passed. No model or
+migration changes were needed.
 
 ## Execution Notes
 

@@ -33,6 +33,7 @@ function AgentCoordinationSettingsPage({ params }: Route.ComponentProps) {
     >
       <PageHead title="Agent Coordination" />
       <CoordinationProjectSettings
+        key={`${workspaceSlug}/${projectId}`}
         workspaceSlug={workspaceSlug}
         projectId={projectId}
         canAdmin={allowPermissions([EUserPermissions.ADMIN], EUserPermissionsLevel.PROJECT, workspaceSlug, projectId)}

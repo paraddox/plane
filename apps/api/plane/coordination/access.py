@@ -94,8 +94,10 @@ def personal_write_targets(request, *, resolved_issue_id=None):
             if isinstance(updates, list)
             else []
         )
-    if view_name == "ModuleIssueListCreateAPIEndpoint":
+    if view_name in ("ModuleIssueListCreateAPIEndpoint", "CycleIssueListCreateAPIEndpoint"):
         return parsed_ids(request.data.get("issues", []))
+    if view_name == "IssueRelationListCreateAPIEndpoint":
+        return ([target_id] if target_id else []) + parsed_ids(request.data.get("issues", []))
     if (
         view_name == "IssueDetailAPIEndpoint"
         and request.method == "PUT"
