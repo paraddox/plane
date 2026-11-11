@@ -152,6 +152,13 @@ def enforce_coordination_access(request, token, *, locked_execution=None):
         raise PermissionDenied("This endpoint is not part of the execution grant.")
     if request.method in SAFE_METHODS and (category or action in ("contract", "overview")):
         require_capability(token, "task:read")
+        if (
+            category == "artifact_detail"
+            and not FileAsset.objects.filter(
+                pk=kwargs.get("pk"), issue_id=target_id, project_id=run.project_id
+            ).exists()
+        ):
+            raise PermissionDenied("This attachment does not belong to the granted work item.")
         return
     if request.method not in SAFE_METHODS:
         if not isinstance(request.data, dict):

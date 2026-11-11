@@ -5,6 +5,7 @@
 from datetime import timedelta
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier, Event
+from unittest.mock import Mock
 from uuid import uuid4
 
 import pytest
@@ -16,6 +17,7 @@ from plane.db.models import (
     AgentProjectAccess,
     AgentRun,
     APIToken,
+    FileAsset,
     Issue,
     ProjectExecutionPolicy,
     ProjectMember,
@@ -122,6 +124,60 @@ def test_worker_cannot_touch_unrelated_task_or_delegate_credentials(execution):
     assert client.get(base + f"{other.pk}/").status_code == 403
     assert client.patch(base + f"{other.pk}/", {"name": "Forbidden"}, format="json").status_code == 403
     assert client.post(prefix + f"runs/{run_id}/credentials/", {}, format="json").status_code == 403
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("target", ["root", "child"])
+@pytest.mark.parametrize("foreign_asset", ["other_issue", "project_asset"])
+def test_attachment_downloads_are_bound_to_the_granted_issue(execution, monkeypatch, target, foreign_asset):
+    _, _, project, issue, contract, _, _, _, _, prefix = execution
+    run_id = claim(execution)
+    client, _ = worker_client(execution, run_id)
+    if target == "child":
+        child = client.post(
+            prefix + f"work-items/{issue.pk}/children/",
+            {
+                "name": "Granted child",
+                "requirements": "Implement the focused scope",
+                "definition_of_done": [{"description": "Child tests pass"}],
+            },
+            format="json",
+        )
+        assert child.status_code == 201, child.data
+        issue = Issue.objects.get(pk=child.data["issue"])
+    other = Issue.objects.create(project=project, name="Unrelated attachment owner")
+    assets = []
+    for related_issue, name in (
+        (issue, "allowed.txt"),
+        (other if foreign_asset == "other_issue" else None, "private.txt"),
+    ):
+        asset = FileAsset(
+            project=project,
+            workspace=project.workspace,
+            issue=related_issue,
+            asset=f"synthetic/{name}",
+            attributes={"name": name},
+            is_uploaded=True,
+            created_by=contract.owner,
+        )
+        asset.save(disable_auto_set_user=True)
+        assets.append(asset)
+    allowed, forbidden = assets
+    storage = Mock()
+    storage.generate_presigned_url.return_value = "https://storage.example/allowed.txt"
+    storage_factory = Mock(return_value=storage)
+    monkeypatch.setattr("plane.api.views.issue.S3Storage", storage_factory)
+    url = f"/api/v1/workspaces/{project.workspace.slug}/projects/{project.pk}/work-items/{issue.pk}/attachments/"
+    denied = client.get(url + f"{forbidden.pk}/")
+    assert denied.status_code == 403, dict(denied.items())
+    assert "Location" not in denied
+    storage_factory.assert_not_called()
+    downloaded = client.get(url + f"{allowed.pk}/")
+    assert downloaded.status_code == 302
+    assert downloaded["Location"] == "https://storage.example/allowed.txt"
+    storage.generate_presigned_url.assert_called_once_with(
+        object_name=allowed.asset.name, disposition="attachment", filename="allowed.txt"
+    )
 
 
 @pytest.mark.django_db

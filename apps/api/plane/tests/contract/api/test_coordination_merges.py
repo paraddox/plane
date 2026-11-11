@@ -18,6 +18,7 @@ from plane.db.models import (
     ProjectMember,
     State,
     User,
+    WorkItemContract,
     WorkspaceMember,
 )
 from plane.coordination.github import MergeRejected, ProviderUnavailable
@@ -523,3 +524,63 @@ def test_expired_active_run_cannot_be_revived_by_renewal(merge_flow):
     AgentRun.objects.filter(pk=run_id).update(lease_expires_at=expired_at)
     assert dispatcher.post(prefix + f"runs/{run_id}/renew/", {}, format="json").status_code == 403
     assert AgentRun.objects.get(pk=run_id).lease_expires_at == expired_at
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("retry_in_flight", [False, True])
+def test_stale_reconciliation_preserves_a_failed_attempt_and_allows_retry(merge_flow, monkeypatch, retry_in_flight):
+    from plane.coordination.merges import reject_merge
+
+    execution, agent, run_id, provider, done, _, _ = merge_flow
+    dispatcher, _, project, _, contract, _, _, _, _, prefix = execution
+    advance(merge_flow)
+    run = AgentRun.objects.get(pk=run_id)
+    attempt = MergeAttempt.objects.create(
+        project=project,
+        run=run,
+        completion_state=done,
+        head_sha=run.head_sha,
+        code_revision=run.code_revision,
+        pull_request=run.pull_request,
+    )
+    AgentRun.objects.filter(pk=run_id).update(status="merging")
+    WorkItemContract.objects.filter(pk=contract.pk).update(status="merging")
+    merge_url = prefix + f"runs/{run_id}/merge/"
+    target_status = provider.target_status
+    rejected_state = {}
+
+    def finish_rejection_during_observation(base, sha):
+        # Reconciliation has already selected the prepared attempt. Complete
+        # the original rejection before its old unmerged observation returns.
+        observation = target_status(base, sha)
+        rejected = reject_merge(project, run_id, attempt.pk)
+        failed = MergeAttempt.objects.get(pk=attempt.pk)
+        rejected_state.update(error=failed.error, finished_at=failed.finished_at, last_error=rejected.last_error)
+        if retry_in_flight:
+            provider.failure = ProviderUnavailable()
+            with monkeypatch.context() as retry_patch:
+                retry_patch.setattr(provider, "target_status", target_status)
+                retry = agent.post(merge_url, MERGE_INPUT, format="json")
+            assert retry.status_code == 202, retry.data
+            provider.failure = None
+        return observation
+
+    monkeypatch.setattr(provider, "target_status", finish_rejection_during_observation)
+    response = dispatcher.post(prefix + f"runs/{run_id}/reconcile/", {}, format="json")
+    assert response.status_code == 202, response.data
+    attempt.refresh_from_db()
+    assert attempt.status == "failed"
+    assert attempt.error == rejected_state["error"]
+    assert attempt.finished_at == rejected_state["finished_at"]
+    run.refresh_from_db()
+    contract.refresh_from_db()
+    assert run.status == ("merging" if retry_in_flight else "active")
+    assert contract.status == ("merging" if retry_in_flight else "review")
+    assert MergeAttempt.objects.filter(run=run, status__in=["prepared", "uncertain"]).count() == int(retry_in_flight)
+    if not retry_in_flight:
+        assert run.last_error == rejected_state["last_error"]
+    monkeypatch.setattr(provider, "target_status", target_status)
+    assert agent.post(merge_url, MERGE_INPUT, format="json").status_code == 200
+    assert MergeAttempt.objects.filter(run=run).count() == 2
+    assert MergeAttempt.objects.filter(run=run, status="failed").count() == 1
+    assert MergeAttempt.objects.filter(run=run, status="confirmed").count() == 1

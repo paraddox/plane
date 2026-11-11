@@ -167,7 +167,9 @@ def prepare_merge(request, project, run_id, expected):
 def record_uncertain(project, run_id, attempt_id):
     run = locked_run(project, run_id)
     attempt = MergeAttempt.objects.select_for_update().get(pk=attempt_id, run=run)
-    if attempt.status == "confirmed":
+    # An old observation cannot revive a terminal attempt or overwrite a run
+    # that has already moved on to fixes, cancellation, or another attempt.
+    if attempt.status not in ("prepared", "uncertain") or run.status != AgentRun.Status.MERGING:
         return run
     attempt.status, attempt.error = "uncertain", "Awaiting authoritative GitHub merge confirmation."
     attempt.save(update_fields=["status", "error", "updated_at"])
