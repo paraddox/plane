@@ -104,6 +104,7 @@ class FileAssetSerializer(BaseSerializer):
         model = FileAsset
         fields = "__all__"
         read_only_fields = [
+            "agent_run",
             "id",
             "created_by",
             "updated_by",

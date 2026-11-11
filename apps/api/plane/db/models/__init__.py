@@ -8,6 +8,22 @@ from .api_idempotency import APIIdempotency
 from .asset import FileAsset
 from .base import BaseModel
 from .cycle import Cycle, CycleIssue, CycleUserProperties
+from .coordination import (
+    AgentProjectAccess,
+    AgentRun,
+    CoordinationEvent,
+    CoordinationSequence,
+    ProjectExecutionPolicy,
+    ProjectRelease,
+    RunTarget,
+    RunChild,
+    RunEvidence,
+    WorkItemQuestion,
+    ReviewRequirement,
+    ReviewDecision,
+    MergeAttempt,
+    WorkItemContract,
+)
 from .deploy_board import DeployBoard
 from .draft import (
     DraftIssue,

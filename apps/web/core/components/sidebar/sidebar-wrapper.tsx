@@ -38,12 +38,12 @@ export const SidebarWrapper = observer(function SidebarWrapper(props: TSidebarWr
 
   useOutsideClickDetector(ref, () => {
     if (sidebarCollapsed === false && window.innerWidth < 768) {
-      toggleSidebar();
+      toggleSidebar(true);
     }
   });
 
   useEffect(() => {
-    if (windowSize[0] < 768 && !sidebarCollapsed) toggleSidebar();
+    if (windowSize[0] < 768 && !sidebarCollapsed) toggleSidebar(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [windowSize]);
 

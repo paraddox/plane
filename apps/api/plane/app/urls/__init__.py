@@ -22,8 +22,10 @@ from .webhook import urlpatterns as webhook_urls
 from .workspace import urlpatterns as workspace_urls
 from .timezone import urlpatterns as timezone_urls
 from .exporter import urlpatterns as exporter_urls
+from plane.coordination.urls import urlpatterns as coordination_urls
 
 urlpatterns = [
+    *coordination_urls,
     *analytic_urls,
     *asset_urls,
     *cycle_urls,

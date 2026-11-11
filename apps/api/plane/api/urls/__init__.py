@@ -17,8 +17,10 @@ from .user import urlpatterns as user_patterns
 from .work_item import urlpatterns as work_item_patterns
 from .invite import urlpatterns as invite_patterns
 from .sticky import urlpatterns as sticky_patterns
+from plane.coordination.urls import machine_urlpatterns as coordination_patterns
 
 urlpatterns = [
+    *coordination_patterns,
     *asset_patterns,
     *business_patterns,
     *bulk_patterns,

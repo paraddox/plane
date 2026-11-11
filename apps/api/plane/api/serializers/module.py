@@ -281,5 +281,6 @@ class ModuleIssueRequestSerializer(serializers.Serializer):
 
     issues = serializers.ListField(
         child=serializers.UUIDField(),
+        allow_empty=False,
         help_text="List of issue IDs to add to the module",
     )

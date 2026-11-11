@@ -1828,6 +1828,7 @@ class IssueAttachmentListCreateAPIEndpoint(BaseAPIView):
     serializer_class = IssueAttachmentSerializer
     model = FileAsset
     use_read_replica = True
+    idempotency_unsupported_methods = {"POST"}
 
     def check_idempotency_permissions(self, request, slug, project_id, issue_id):
         issue = Issue.objects.get(pk=issue_id, workspace__slug=slug, project_id=project_id)
@@ -1986,6 +1987,7 @@ class IssueAttachmentListCreateAPIEndpoint(BaseAPIView):
 
         # Create a File Asset
         asset = FileAsset.objects.create(
+            agent_run=getattr(request, "coordination_run", None),
             attributes={"name": name, "type": type, "size": size_limit},
             asset=asset_key,
             size=size_limit,

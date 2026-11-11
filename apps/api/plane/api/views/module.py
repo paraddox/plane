@@ -6,7 +6,7 @@
 import json
 
 # Django imports
-from django.core import serializers
+from django.db import transaction
 from django.db.models import Count, F, Func, OuterRef, Prefetch, Q
 from django.utils import timezone
 from django.core.serializers.json import DjangoJSONEncoder
@@ -18,6 +18,7 @@ from drf_spectacular.utils import OpenApiResponse, OpenApiRequest
 
 # Module imports
 from plane.utils.tasks import delay_on_commit
+from plane.coordination.modules import assign_modules
 from plane.api.serializers import (
     IssueSerializer,
     ModuleIssueSerializer,
@@ -657,7 +658,7 @@ class ModuleIssueListCreateAPIEndpoint(BaseAPIView):
     @module_issue_docs(
         operation_id="add_module_work_items",
         summary="Add Work Items to Module",
-        description="Assign multiple work items to a module or move them from another module. Automatically handles bulk creation and updates with activity tracking.",  # noqa: E501
+        description="Add work items to this module without removing their other module memberships.",
         parameters=[
             MODULE_ID_PARAMETER,
         ],
@@ -675,74 +676,18 @@ class ModuleIssueListCreateAPIEndpoint(BaseAPIView):
             404: MODULE_NOT_FOUND_RESPONSE,
         },
     )
+    @transaction.atomic
     def post(self, request, slug, project_id, module_id):
         """Add module work items
 
-        Assign multiple work items to a module or move them from another module.
-        Automatically handles bulk creation and updates with activity tracking.
+        Add work items to a module, preserving memberships in other modules.
         """
-        issues = request.data.get("issues", [])
-        if not len(issues):
-            return Response({"error": "Issues are required"}, status=status.HTTP_400_BAD_REQUEST)
-        module = Module.objects.get(workspace__slug=slug, project_id=project_id, pk=module_id)
-
-        issues = Issue.objects.filter(workspace__slug=slug, project_id=project_id, pk__in=issues).values_list(
-            "id", flat=True
-        )
-
-        module_issues = list(ModuleIssue.objects.filter(issue_id__in=issues))
-
-        update_module_issue_activity = []
-        records_to_update = []
-        record_to_create = []
-
-        for issue in issues:
-            module_issue = [module_issue for module_issue in module_issues if str(module_issue.issue_id) in issues]
-
-            if len(module_issue):
-                if module_issue[0].module_id != module_id:
-                    update_module_issue_activity.append(
-                        {
-                            "old_module_id": str(module_issue[0].module_id),
-                            "new_module_id": str(module_id),
-                            "issue_id": str(module_issue[0].issue_id),
-                        }
-                    )
-                    module_issue[0].module_id = module_id
-                    records_to_update.append(module_issue[0])
-            else:
-                record_to_create.append(
-                    ModuleIssue(
-                        module=module,
-                        issue_id=issue,
-                        project_id=project_id,
-                        workspace=module.workspace,
-                        created_by=request.user,
-                        updated_by=request.user,
-                    )
-                )
-
-        ModuleIssue.objects.bulk_create(record_to_create, batch_size=10, ignore_conflicts=True)
-
-        ModuleIssue.objects.bulk_update(records_to_update, ["module"], batch_size=10)
-
-        # Capture Issue Activity
-        delay_on_commit(
-            issue_activity,
-            type="module.activity.created",
-            requested_data=json.dumps({"modules_list": str(issues)}),
-            actor_id=str(self.request.user.id),
-            issue_id=None,
-            project_id=str(self.kwargs.get("project_id", None)),
-            current_instance=json.dumps(
-                {
-                    "updated_module_issues": update_module_issue_activity,
-                    "created_module_issues": serializers.serialize("json", record_to_create),
-                }
-            ),
-            epoch=int(timezone.now().timestamp()),
-            origin=base_host(request=request, is_app=True),
-        )
+        serializer = ModuleIssueRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        issues = serializer.validated_data["issues"]
+        module = Module.objects.select_related("project").get(workspace__slug=slug, project_id=project_id, pk=module_id)
+        for issue_id in sorted(set(issues)):
+            assign_modules(request, module.project, issue_id, [module.id], [])
 
         return Response(
             ModuleIssueSerializer(self.get_queryset(), many=True).data,

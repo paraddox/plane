@@ -101,6 +101,8 @@ class IdempotencyMixin:
         super().initial(request, *args, **kwargs)
         if request.method not in {"POST", "PUT", "PATCH", "DELETE"} or "Idempotency-Key" not in request.headers:
             return
+        if request.method in getattr(self, "idempotency_unsupported_methods", set()):
+            raise ValidationError({"Idempotency-Key": "This operation does not store replay responses."})
         method = request.method.lower()
         handler = getattr(self, method, None)
         if handler is None:

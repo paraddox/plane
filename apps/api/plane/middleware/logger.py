@@ -110,6 +110,9 @@ class APITokenLogMiddleware:
             # under arbitrary names. Keep audit metadata, never their raw values.
             log_data = {
                 "token_identifier": str(token.pk) if getattr(token, "pk", None) else "unauthenticated",
+                "agent_run_id": str(token.agent_run_id) if getattr(token, "agent_run_id", None) else None,
+                "delegated_by_id": str(token.delegated_by_id) if getattr(token, "delegated_by_id", None) else None,
+                "worker_id": token.agent_run.worker_id if getattr(token, "agent_run_id", None) else None,
                 "path": request.path.replace(api_key, "[REDACTED]"),
                 "method": request.method,
                 "query_params": urlencode(
