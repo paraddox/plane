@@ -170,10 +170,10 @@ creation surfaces, project settings/releases, shared services/types, docs.
 
 ## Final Evidence
 
-- 359 backend API/authentication/security/coordination tests passed with actual
+- 372 backend API/authentication/security/coordination tests passed with actual
   PostgreSQL migrations and Valkey, including the real-HTTP GitHub fixture and
   concurrent claim/credential/revocation checks. Schema validation is included.
-- Main migration 0122 upgraded through 0129 with existing tasks and hashed keys
+- Main migration 0122 upgraded through 0130 with existing tasks and hashed keys
   preserved and actual authenticated API access retained. Existing explicit
   answers backfilled correctly; reversing to 0127 and reapplying retained data.
   `makemigrations --check --dry-run` reports no changes.
@@ -190,6 +190,9 @@ creation surfaces, project settings/releases, shared services/types, docs.
   deleted, and unresolved merge history cannot be erased by deletion.
 - Local UI: http://127.0.0.1:3000. API: http://127.0.0.1:8000. The disposable
   fixture's synthetic login is in `/private/tmp/plane-coordination-login.txt`.
+  These URLs/login describe the initial browser verification. The subsequent
+  Docker recovery recreated the disposable database; reseed the demo before
+  reusing that login, following `docs/agent-coordination.md`.
 
 Limits: GitHub write behavior is verified with HTTP fixtures, not a live App
 installation; operator-specific repository protections require staging validation
@@ -223,6 +226,28 @@ renamed. The repository's hosted PR build/lint workflows target `preview`, not
 `main`; PR #3 currently has no hosted checks, so local results are not presented
 as hosted CI success. Live provider staging and the existing app-shell warning
 limitations above remain unchanged. This PR is not merged or deployed.
+
+### Independent Review Follow-Ups
+
+Four further findings were implemented and covered by API/PostgreSQL regressions:
+
+- Attachment downloads bind the asset to the granted issue and project before
+  storage signing. Root/child reads remain available for valid attachments.
+- Stale reconciliation preserves failed attempts and cannot overwrite a newer
+  pending attempt; subsequent authorized retries still complete.
+- Personal-key external-ID upserts resolve coordinated targets before mutation
+  or replay, and recheck under the issue lock after authentication.
+- Required-child states are locked during admission and protected by migration
+  0130 during pending merges, including group changes and soft deletion.
+
+The last seven regression cases were initially blocked by an unavailable local
+Docker engine. After the user-approved Docker Desktop restart and restoration
+of the isolated PostgreSQL/Valkey stack, all seven passed. The complete relevant
+suite then passed 372 tests with actual migrations. A fresh upgrade from main
+through 0130 preserved tasks, keys, answers and authenticated API access; reversing
+to 0127 and reapplying succeeded. Migration drift checking also passed. No code
+changes were needed following restored-runtime verification. The earlier runtime
+validation limitation on commit 2b0f1a6ea is therefore cleared.
 
 ## Execution Notes
 
