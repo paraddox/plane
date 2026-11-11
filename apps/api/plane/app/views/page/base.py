@@ -30,6 +30,7 @@ from rest_framework import status
 from rest_framework.response import Response
 
 # Module imports
+from plane.utils.tasks import delay_on_commit
 from plane.app.permissions import allow_permission, ROLE
 from plane.app.serializers import (
     PageSerializer,
@@ -141,7 +142,8 @@ class PageViewSet(BaseViewSet):
         if serializer.is_valid():
             serializer.save()
             # capture the page transaction
-            page_transaction.delay(
+            delay_on_commit(
+                page_transaction,
                 new_description_html=request.data.get("description_html", "<p></p>"),
                 old_description_html=None,
                 page_id=serializer.data["id"],
@@ -185,7 +187,8 @@ class PageViewSet(BaseViewSet):
                 serializer.save()
                 # capture the page transaction
                 if request.data.get("description_html"):
-                    page_transaction.delay(
+                    delay_on_commit(
+                        page_transaction,
                         new_description_html=request.data.get("description_html", "<p></p>"),
                         old_description_html=page_description,
                         page_id=page_id,
@@ -234,7 +237,8 @@ class PageViewSet(BaseViewSet):
             data = PageDetailSerializer(page).data
             data["issue_ids"] = issue_ids
             if track_visit:
-                recent_visited_task.delay(
+                delay_on_commit(
+                    recent_visited_task,
                     slug=slug,
                     entity_name="page",
                     entity_identifier=page_id,
@@ -558,14 +562,16 @@ class PagesDescriptionViewSet(BaseViewSet):
 
             # Capture the page transaction
             if request.data.get("description_html"):
-                page_transaction.delay(
+                delay_on_commit(
+                    page_transaction,
                     new_description_html=request.data.get("description_html", "<p></p>"),
                     old_description_html=old_description_html,
                     page_id=page_id,
                 )
 
             # Run background tasks
-            track_page_version.delay(
+            delay_on_commit(
+                track_page_version,
                 page_id=page_id,
                 existing_instance=existing_instance,
                 user_id=request.user.id,
@@ -610,14 +616,16 @@ class PageDuplicateEndpoint(BaseAPIView):
                 updated_by_id=page.updated_by_id,
             )
 
-        page_transaction.delay(
+        delay_on_commit(
+            page_transaction,
             new_description_html=page.description_html,
             old_description_html=None,
             page_id=page.id,
         )
 
         # Copy the s3 objects uploaded in the page
-        copy_s3_objects_of_description_and_assets.delay(
+        delay_on_commit(
+            copy_s3_objects_of_description_and_assets,
             entity_name="PAGE",
             entity_identifier=page.id,
             project_id=project_id,

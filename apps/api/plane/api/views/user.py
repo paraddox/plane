@@ -16,6 +16,7 @@ from plane.utils.openapi import USER_EXAMPLE
 
 
 class UserEndpoint(BaseAPIView):
+    api_key_scope_identity = True
     serializer_class = UserLiteSerializer
     model = User
 

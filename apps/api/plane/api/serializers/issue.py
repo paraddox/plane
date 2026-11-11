@@ -3,6 +3,8 @@
 # See the LICENSE file for details.
 
 # Django imports
+from uuid import UUID
+
 from django.utils import timezone
 from lxml import html
 from django.db import IntegrityError
@@ -826,14 +828,14 @@ class IssueExpandSerializer(BaseSerializer):
     state = StateLiteSerializer(read_only=True)
     description = serializers.JSONField(source="description_json", read_only=True)
 
-    def get_labels(self, obj):
+    def get_labels(self, obj) -> list[UUID] | list[dict]:
         expand = self.context.get("expand", [])
         if "labels" in expand:
             # Use prefetched data
             return LabelLiteSerializer([il.label for il in obj.label_issue.all()], many=True).data
         return [il.label_id for il in obj.label_issue.all()]
 
-    def get_assignees(self, obj):
+    def get_assignees(self, obj) -> list[UUID] | list[dict]:
         expand = self.context.get("expand", [])
         if "assignees" in expand:
             return UserLiteSerializer([ia.assignee for ia in obj.issue_assignee.all()], many=True).data

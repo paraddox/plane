@@ -39,7 +39,7 @@ class ProjectPagePermission(BasePermission):
             return False
 
         if page_id:
-            page = Page.objects.get(id=page_id, workspace__slug=slug)
+            page = self._get_page(request, view)
 
             # Allow access if the user is the owner of the page
             if page.owned_by_id == user_id:
@@ -51,6 +51,9 @@ class ProjectPagePermission(BasePermission):
 
         # Handle public page access
         return self._has_public_page_action_access(request, role)
+
+    def _get_page(self, request, view):
+        return Page.objects.get(id=view.kwargs["page_id"], workspace__slug=view.kwargs["slug"])
 
     def _check_project_member_access(self, request, slug, project_id):
         """

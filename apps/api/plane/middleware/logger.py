@@ -4,7 +4,9 @@
 
 # Python imports
 import logging
+import json
 import time
+from urllib.parse import parse_qsl, urlencode
 
 # Django imports
 from django.http import HttpRequest
@@ -56,12 +58,18 @@ class RequestLoggerMiddleware:
         )
 
         user_agent = request.META.get("HTTP_USER_AGENT", "")
+        api_key = request.headers.get("X-Api-Key")
+        path = request.get_full_path()
+        if api_key:
+            # API audit records deliberately exclude arbitrary caller-supplied values.
+            path = request.path.replace(api_key, "[REDACTED]")
+            user_agent = "[REDACTED]"
 
         # Log the request information
         api_logger.info(
-            f"{request.method} {request.get_full_path()} {response.status_code}",
+            f"{request.method} {path} {response.status_code}",
             extra={
-                "path": request.path,
+                "path": path,
                 "method": request.method,
                 "status_code": response.status_code,
                 "duration_ms": int(duration * 1000),
@@ -84,34 +92,11 @@ class APITokenLogMiddleware:
         self.get_response = get_response
 
     def __call__(self, request):
-        request_body = request.body
         response = self.get_response(request)
-        self.process_request(request, response, request_body)
+        self.process_request(request, response)
         return response
 
-    def _safe_decode_body(self, content):
-        """
-        Safely decodes request/response body content, handling binary data.
-        Returns None if content is None, or a string representation of the content.
-        """
-        # If the content is None, return None
-        if content is None:
-            return None
-
-        # If the content is an empty bytes object, return None
-        if content == b"":
-            return None
-
-        # Check if content is binary by looking for common binary file signatures
-        if content.startswith(b"\x89PNG") or content.startswith(b"\xff\xd8\xff") or content.startswith(b"%PDF"):
-            return "[Binary Content]"
-
-        try:
-            return content.decode("utf-8")
-        except UnicodeDecodeError:
-            return "[Could not decode content]"
-
-    def process_request(self, request, response, request_body):
+    def process_request(self, request, response):
         api_key_header = "X-Api-Key"
         api_key = request.headers.get(api_key_header)
 
@@ -120,17 +105,25 @@ class APITokenLogMiddleware:
             return
 
         try:
+            token = getattr(request, "auth", None)
+            # Headers and free-text bodies can contain credentials or business data
+            # under arbitrary names. Keep audit metadata, never their raw values.
             log_data = {
-                "token_identifier": api_key,
-                "path": request.path,
+                "token_identifier": str(token.pk) if getattr(token, "pk", None) else "unauthenticated",
+                "path": request.path.replace(api_key, "[REDACTED]"),
                 "method": request.method,
-                "query_params": request.META.get("QUERY_STRING", ""),
-                "headers": str(request.headers),
-                "body": self._safe_decode_body(request_body) if request_body else None,
-                "response_body": self._safe_decode_body(response.content) if response.content else None,
+                "query_params": urlencode(
+                    [
+                        (name.replace(api_key, "[REDACTED]"), "[REDACTED]")
+                        for name, _ in parse_qsl(request.META.get("QUERY_STRING", ""), keep_blank_values=True)
+                    ]
+                ),
+                "headers": json.dumps({name: "[REDACTED]" for name in request.headers}),
+                "body": None,
+                "response_body": None,
                 "response_code": response.status_code,
                 "ip_address": get_client_ip(request=request),
-                "user_agent": request.META.get("HTTP_USER_AGENT", None),
+                "user_agent": None,
             }
             user_id = (
                 str(request.user.id)

@@ -3,7 +3,6 @@
 # See the LICENSE file for details.
 
 # Python import
-from uuid import uuid4
 from typing import Optional
 
 # Third party
@@ -14,29 +13,18 @@ from rest_framework import status
 # Module import
 from .base import BaseAPIView
 from plane.db.models import APIToken
+from plane.db.models.api import generate_token
 from plane.app.serializers import APITokenSerializer, APITokenReadSerializer
 
 
 class ApiTokenEndpoint(BaseAPIView):
     def post(self, request: Request) -> Response:
-        label = request.data.get("label", str(uuid4().hex))
-        description = request.data.get("description", "")
-        expired_at = request.data.get("expired_at", None)
-
-        # Check the user type
-        user_type = 1 if request.user.is_bot else 0
-
-        api_token = APIToken.objects.create(
-            label=label,
-            description=description,
-            user=request.user,
-            user_type=user_type,
-            expired_at=expired_at,
-        )
-
-        serializer = APITokenSerializer(api_token)
-        # Token will be only visible while creating
-        return Response(serializer.data, status=status.HTTP_201_CREATED)
+        serializer = APITokenSerializer(data=request.data, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        token = generate_token()
+        serializer.save(user=request.user, user_type=1 if request.user.is_bot else 0, token=token)
+        # The raw credential exists only in this creation response, never in stored token data.
+        return Response({**serializer.data, "token": token}, status=status.HTTP_201_CREATED)
 
     def get(self, request: Request, pk: Optional[str] = None) -> Response:
         if pk is None:
@@ -44,7 +32,7 @@ class ApiTokenEndpoint(BaseAPIView):
             serializer = APITokenReadSerializer(api_tokens, many=True)
             return Response(serializer.data, status=status.HTTP_200_OK)
         else:
-            api_tokens = APIToken.objects.get(user=request.user, pk=pk)
+            api_tokens = APIToken.objects.get(user=request.user, pk=pk, is_service=False)
             serializer = APITokenReadSerializer(api_tokens)
             return Response(serializer.data, status=status.HTTP_200_OK)
 
@@ -54,8 +42,8 @@ class ApiTokenEndpoint(BaseAPIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     def patch(self, request: Request, pk: str) -> Response:
-        api_token = APIToken.objects.get(user=request.user, pk=pk)
-        serializer = APITokenSerializer(api_token, data=request.data, partial=True)
+        api_token = APIToken.objects.get(user=request.user, pk=pk, is_service=False)
+        serializer = APITokenSerializer(api_token, data=request.data, partial=True, context={"request": request})
         if serializer.is_valid():
             serializer.save()
             return Response(serializer.data, status=status.HTTP_200_OK)

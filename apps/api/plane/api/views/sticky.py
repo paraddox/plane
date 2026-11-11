@@ -59,7 +59,7 @@ class StickyViewSet(BaseViewSet):
         description="List all stickies in the workspace",
         responses={
             200: create_paginated_response(
-                StickySerializer, "Sticky", "List of stickies", example_name="List of stickies"
+                StickySerializer, "PaginatedStickyResponse", "List of stickies", example_name="List of stickies"
             )
         },
     )

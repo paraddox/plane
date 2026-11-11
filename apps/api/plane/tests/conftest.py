@@ -60,7 +60,8 @@ def api_token(db, create_user):
 @pytest.fixture
 def api_key_client(api_client, api_token):
     """Return an API key authenticated client for external API testing"""
-    api_client.credentials(HTTP_X_API_KEY=api_token.token)
+    # Authentication uses the original credential, never its stored digest.
+    api_client.credentials(HTTP_X_API_KEY="test-api-token-12345")
     return api_client
 
 

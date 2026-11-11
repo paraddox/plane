@@ -5,6 +5,8 @@
  */
 
 import { useState } from "react";
+import { observer } from "mobx-react";
+import useSWR from "swr";
 import { add } from "date-fns";
 import { Controller, useForm } from "react-hook-form";
 import { Calendar } from "lucide-react";
@@ -18,6 +20,8 @@ import { CustomSelect, Input, TextArea, ToggleSwitch } from "@plane/ui";
 import { cn, renderFormattedDate, renderFormattedTime } from "@plane/utils";
 // components
 import { DateDropdown } from "@/components/dropdowns/date";
+import { useWorkspace } from "@/hooks/store/use-workspace";
+import { ProjectService } from "@/services/project/project.service";
 // helpers
 type Props = {
   handleClose: () => void;
@@ -53,7 +57,12 @@ const defaultValues: Partial<IApiToken> = {
   label: "",
   description: "",
   expired_at: null,
+  workspace: null,
+  project: null,
+  scopes: ["read", "write"],
 };
+
+const projectService = new ProjectService();
 
 const getExpiryDate = (val: string): Date | null | undefined => {
   const today = new Date();
@@ -70,7 +79,7 @@ const getFormattedDate = (date: Date): Date => {
   return add(date, { hours, minutes, seconds });
 };
 
-export function CreateApiTokenForm(props: Props) {
+export const CreateApiTokenForm = observer(function CreateApiTokenForm(props: Props) {
   const { handleClose, neverExpires, toggleNeverExpires, onSubmit } = props;
   // states
   const [customDate, setCustomDate] = useState<Date | null>(null);
@@ -80,10 +89,21 @@ export function CreateApiTokenForm(props: Props) {
     formState: { errors, isSubmitting },
     handleSubmit,
     reset,
+    setValue,
     watch,
   } = useForm<IApiToken>({ defaultValues });
   // hooks
   const { t } = useTranslation();
+  const { workspaces } = useWorkspace();
+  const workspaceId = watch("workspace");
+  const workspaceSlug = workspaceId ? workspaces[workspaceId]?.slug : undefined;
+  const {
+    data: projects,
+    isLoading: projectsLoading,
+    error: projectsError,
+  } = useSWR(workspaceSlug ? ["api-token-projects", workspaceSlug] : null, () =>
+    workspaceSlug ? projectService.getProjectsLite(workspaceSlug) : Promise.resolve([])
+  );
 
   const handleFormSubmit = async (data: IApiToken) => {
     // if never expires is toggled off, and the user has not selected a custom date or a predefined date, show an error
@@ -97,6 +117,9 @@ export function CreateApiTokenForm(props: Props) {
     const payload: Partial<IApiToken> = {
       label: data.label,
       description: data.description,
+      workspace: data.workspace,
+      project: data.project,
+      scopes: data.scopes,
     };
 
     // if never expires is toggled on, set expired_at to null
@@ -111,10 +134,9 @@ export function CreateApiTokenForm(props: Props) {
       if (expiryDate) payload.expired_at = expiryDate.toISOString();
     }
 
-    await onSubmit(payload).then(() => {
-      reset(defaultValues);
-      setCustomDate(null);
-    });
+    await onSubmit(payload);
+    reset(defaultValues);
+    setCustomDate(null);
   };
 
   const today = new Date();
@@ -168,6 +190,79 @@ export function CreateApiTokenForm(props: Props) {
               />
             )}
           />
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <fieldset className="min-w-0 space-y-1">
+              <legend className="text-12 text-secondary">Workspace access</legend>
+              <Controller
+                control={control}
+                name="workspace"
+                render={({ field: { value, onChange } }) => (
+                  <CustomSelect
+                    value={value ?? ""}
+                    onChange={(selected: string) => {
+                      onChange(selected || null);
+                      setValue("project", null);
+                    }}
+                    label={value ? workspaces[value]?.name : "All my workspaces"}
+                    buttonClassName="w-full"
+                  >
+                    <CustomSelect.Option value="">All my workspaces</CustomSelect.Option>
+                    {Object.values(workspaces).map((workspace) => (
+                      <CustomSelect.Option key={workspace.id} value={workspace.id}>
+                        {workspace.name}
+                      </CustomSelect.Option>
+                    ))}
+                  </CustomSelect>
+                )}
+              />
+            </fieldset>
+            <fieldset className="min-w-0 space-y-1">
+              <legend className="text-12 text-secondary">Project access</legend>
+              <Controller
+                control={control}
+                name="project"
+                render={({ field: { value, onChange } }) => (
+                  <CustomSelect
+                    value={value ?? ""}
+                    onChange={(selected: string) => onChange(selected || null)}
+                    label={value ? projects?.find((project) => project.id === value)?.name : "All projects"}
+                    disabled={!workspaceSlug || projectsLoading}
+                    buttonClassName="w-full"
+                  >
+                    <CustomSelect.Option value="">All projects</CustomSelect.Option>
+                    {projects?.map((project) => (
+                      <CustomSelect.Option key={project.id} value={project.id}>
+                        {project.name}
+                      </CustomSelect.Option>
+                    ))}
+                  </CustomSelect>
+                )}
+              />
+              {projectsError && (
+                <span role="alert" className="text-11 text-danger-primary">
+                  Could not load projects.
+                </span>
+              )}
+            </fieldset>
+          </div>
+          <fieldset className="min-w-0 space-y-1">
+            <legend className="text-12 text-secondary">Permissions</legend>
+            <Controller
+              control={control}
+              name="scopes"
+              render={({ field: { value, onChange } }) => (
+                <CustomSelect
+                  value={value?.includes("write") ? "write" : "read"}
+                  onChange={(selected: string) => onChange(selected === "write" ? ["read", "write"] : ["read"])}
+                  label={value?.includes("write") ? "Read and write" : "Read only"}
+                  buttonClassName="w-full"
+                >
+                  <CustomSelect.Option value="write">Read and write</CustomSelect.Option>
+                  <CustomSelect.Option value="read">Read only</CustomSelect.Option>
+                </CustomSelect>
+              )}
+            />
+          </fieldset>
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2">
               <Controller
@@ -238,10 +333,13 @@ export function CreateApiTokenForm(props: Props) {
         </div>
       </div>
       <div className="flex items-center justify-between gap-2 border-t-[0.5px] border-subtle px-5 py-4">
-        <div className="flex cursor-pointer items-center gap-1.5" onClick={toggleNeverExpires}>
-          <div className="flex cursor-pointer items-center justify-center">
-            <ToggleSwitch value={neverExpires} onChange={() => {}} size="sm" />
-          </div>
+        <div className="flex items-center gap-1.5">
+          <ToggleSwitch
+            value={neverExpires}
+            onChange={toggleNeverExpires}
+            label={t("workspace_settings.settings.api_tokens.never_expires")}
+            size="sm"
+          />
           <span className="text-11">{t("workspace_settings.settings.api_tokens.never_expires")}</span>
         </div>
         <div className="flex items-center gap-2">
@@ -257,4 +355,4 @@ export function CreateApiTokenForm(props: Props) {
       </div>
     </form>
   );
-}
+});

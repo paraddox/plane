@@ -40,12 +40,15 @@ SPECTACULAR_SETTINGS = {
     "PREPROCESSING_HOOKS": [
         "plane.utils.openapi.hooks.preprocess_filter_api_v1_paths",
     ],
+    "POSTPROCESSING_HOOKS": [
+        "drf_spectacular.hooks.postprocess_schema_enums",
+        "plane.utils.openapi.hooks.postprocess_api_write_headers",
+    ],
     # ========================================================================
     # Server Configuration
     # ========================================================================
     "SERVERS": [
-        {"url": "http://localhost:8000", "description": "Local"},
-        {"url": "https://api.plane.so", "description": "Production"},
+        {"url": "/", "description": "Current deployment"},
     ],
     # ========================================================================
     # API Tag Definitions

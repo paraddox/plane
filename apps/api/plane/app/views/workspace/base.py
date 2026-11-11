@@ -25,6 +25,7 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.response import Response
 
+from plane.utils.tasks import delay_on_commit
 from plane.app.permissions import (
     WorkSpaceAdminPermission,
     WorkSpaceBasePermission,
@@ -136,9 +137,10 @@ class WorkSpaceViewSet(BaseViewSet):
                 data["total_members"] = total_members
                 data["role"] = 20
 
-                workspace_seed.delay(serializer.data["id"])
+                delay_on_commit(workspace_seed, serializer.data["id"])
 
-                track_event.delay(
+                delay_on_commit(
+                    track_event,
                     user_id=request.user.id,
                     event_name=WORKSPACE_CREATED,
                     slug=data["slug"],
@@ -185,7 +187,8 @@ class WorkSpaceViewSet(BaseViewSet):
         # Get the workspace
         workspace = self.get_object()
         self.remove_last_workspace_ids_from_user_settings(workspace.id)
-        track_event.delay(
+        delay_on_commit(
+            track_event,
             user_id=request.user.id,
             event_name=WORKSPACE_DELETED,
             slug=workspace.slug,

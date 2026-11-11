@@ -23,6 +23,7 @@ from rest_framework import status
 from rest_framework.response import Response
 
 # Module imports
+from plane.utils.tasks import delay_on_commit
 from plane.app.permissions import allow_permission, ROLE
 from plane.app.serializers import IssueViewSerializer, ViewIssueListSerializer
 from plane.db.models import (
@@ -102,7 +103,8 @@ class WorkspaceViewViewSet(BaseViewSet):
     def retrieve(self, request, slug, pk):
         issue_view = self.get_queryset().filter(pk=pk).first()
         serializer = IssueViewSerializer(issue_view)
-        recent_visited_task.delay(
+        delay_on_commit(
+            recent_visited_task,
             slug=slug,
             project_id=None,
             entity_name="view",
@@ -331,7 +333,8 @@ class IssueViewViewSet(BaseViewSet):
             )
 
         serializer = IssueViewSerializer(issue_view)
-        recent_visited_task.delay(
+        delay_on_commit(
+            recent_visited_task,
             slug=slug,
             project_id=project_id,
             entity_name="view",
