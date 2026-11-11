@@ -320,7 +320,17 @@ class SavedViewUpdateMixin:
         if self.action != "destroy" and (saved_view.is_locked or saved_view.owned_by_id != request.user.id):
             raise PermissionDenied("Only the owner can update an unlocked view.")
         if self.action == "destroy" and saved_view.owned_by_id != request.user.id:
-            require_handler_roles(self, request, [ROLE.ADMIN], level=level, **kwargs)
+            if kwargs.get("project_id"):
+                if not ProjectMember.objects.filter(
+                    workspace__slug=kwargs["slug"],
+                    project_id=kwargs["project_id"],
+                    member=request.user,
+                    is_active=True,
+                    role=ROLE.ADMIN.value,
+                ).exists():
+                    raise PermissionDenied("Only the owner or a project admin can delete this view.")
+            else:
+                require_handler_roles(self, request, [ROLE.ADMIN], level=level, **kwargs)
 
 
 @extend_schema(tags=["Views"])

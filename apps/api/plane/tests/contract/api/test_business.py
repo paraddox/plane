@@ -556,6 +556,19 @@ DELETE_TARGETS = ["page", "workspace_view", "project_view", "notification", "web
 @pytest.mark.contract
 @pytest.mark.django_db
 class TestBusinessDeleteReplay:
+    @pytest.mark.parametrize("delete_target", ["project_view"], indirect=True)
+    def test_workspace_admin_cannot_replay_after_losing_project_admin_role(
+        self, agent_client, delete_target, workspace, project, create_user
+    ):
+        _, obj, url = delete_target
+        headers = {"HTTP_IDEMPOTENCY_KEY": f"project-admin-delete-{obj.pk}"}
+        assert agent_client.delete(url, {}, format="json", **headers).status_code == 204
+        ProjectMember.objects.filter(project=project, member=create_user).update(role=15)
+        assert WorkspaceMember.objects.get(workspace=workspace, member=create_user).role == 20
+        denied = agent_client.delete(url, {}, format="json", **headers)
+        assert denied.status_code == 403
+        assert "Idempotency-Replayed" not in denied
+
     @pytest.mark.parametrize("delete_target", ["workspace_view", "project_view"], indirect=True)
     def test_admin_can_replay_deleting_another_owners_private_view(self, agent_client, delete_target):
         _, obj, url = delete_target
