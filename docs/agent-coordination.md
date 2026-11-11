@@ -149,8 +149,12 @@ Rotation revokes older run keys. `Idempotency-Key` is rejected for this endpoint
 so plaintext credentials never enter the replay-response store. If the response
 is lost, issue a replacement; the previous key is revoked.
 
-Renew leases and rotate credentials while authorized and before expiry. Worker
-heartbeats do not extend their own authority. Disabled execution, removed
+Renew leases and rotate credentials while authorized and before expiry. A fenced
+pending merge cannot be reassigned: its owning dispatcher may restore that same
+run's expired lease, then rotate its execution credential so the assigned agent
+can finish recovery. This does not revive expired active runs, bypass revoked
+access, or let workers renew themselves. Worker heartbeats do not extend their
+own authority. Disabled execution, removed
 membership/identity access, parent-key revocation/expiry, cancellation, stale
 specs, and confirmed completion fence execution keys. Authentication reads the
 primary database even when business reads use a replica.
@@ -264,6 +268,8 @@ execution access has ended. `202` means an outcome is uncertain and the run stay
 Merging. The same still-authorized agent may repeat the **same** merge command
 for the **same** fenced attempt; retries cannot change its spec, head, PR, or
 target. A rejection of a retry never discards an earlier unknown operation.
+Admitting a concurrent retry durably marks uncertainty before its remote write;
+a later rejection of the original call cannot reopen or reassign that run.
 `reconcile/` is observation-only and is also available to the owning dispatcher
 or human owner/admin. It never independently merges anything. Neither merge nor
 reconcile supports `Idempotency-Key`: their persisted attempt is the recovery

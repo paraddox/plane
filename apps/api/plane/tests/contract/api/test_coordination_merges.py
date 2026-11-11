@@ -2,8 +2,11 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
+from datetime import timedelta
+
 import pytest
 from django.db import IntegrityError, transaction
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from plane.db.models import (
@@ -455,3 +458,68 @@ def test_task_deletion_cannot_erase_an_in_flight_merge(merge_flow):
         Issue.all_objects.filter(pk=issue.pk).delete()
     assert Issue.objects.filter(pk=issue.pk).exists()
     assert MergeAttempt.objects.get(run_id=run_id).status == "uncertain"
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("reject_before_retry_result", [False, True])
+def test_earlier_rejection_cannot_clear_an_overlapping_retry_fence(merge_flow, monkeypatch, reject_before_retry_result):
+    from plane.coordination.merges import reject_merge
+
+    execution, agent, run_id, provider, _, session, _ = merge_flow
+    _, human, project, _, contract, _, _, _, _, prefix = execution
+    advance(merge_flow)
+    url = prefix + f"runs/{run_id}/merge/"
+    entered = False
+
+    def overlapping_merge(base, sha):
+        nonlocal entered
+        if not entered:
+            entered = True
+            retry = agent.post(url, MERGE_INPUT, format="json")
+            assert retry.status_code == 202, retry.data
+            raise MergeRejected()
+        attempt = MergeAttempt.objects.get(run_id=run_id)
+        assert attempt.status == "uncertain"
+        if reject_before_retry_result:
+            assert reject_merge(project, run_id, attempt.pk).status == "merging"
+        raise ProviderUnavailable()
+
+    monkeypatch.setattr(provider, "merge", overlapping_merge)
+    response = agent.post(url, MERGE_INPUT, format="json")
+    assert response.status_code == 202, response.data
+    assert AgentRun.objects.get(pk=run_id).status == "merging"
+    contract.refresh_from_db()
+    assert contract.status == "merging"
+    assert MergeAttempt.objects.get(run_id=run_id).status == "uncertain"
+    assert human.post(session + f"runs/{run_id}/cancel/", {}, format="json").status_code == 409
+
+
+@pytest.mark.django_db(transaction=True)
+def test_expired_pending_merge_can_be_renewed_only_by_its_dispatcher(merge_flow):
+    execution, agent, run_id, provider, _, _, _ = merge_flow
+    dispatcher, _, _, _, _, _, _, _, _, prefix = execution
+    advance(merge_flow)
+    url = prefix + f"runs/{run_id}/merge/"
+    provider.failure = ProviderUnavailable()
+    assert agent.post(url, MERGE_INPUT, format="json").status_code == 202
+    AgentRun.objects.filter(pk=run_id).update(lease_expires_at=timezone.now() - timedelta(seconds=1))
+    assert agent.post(url, MERGE_INPUT, format="json").status_code == 403
+    renewed = dispatcher.post(prefix + f"runs/{run_id}/renew/", {}, format="json")
+    assert renewed.status_code == 200, renewed.data
+    assert renewed.data["status"] == "merging"
+    assert AgentRun.objects.get(pk=run_id).lease_expires_at > timezone.now()
+    resumed, _ = worker_client(execution, run_id)
+    provider.failure = None
+    assert resumed.post(url, MERGE_INPUT, format="json").status_code == 200
+    assert AgentRun.objects.filter(contract_id=AgentRun.objects.get(pk=run_id).contract_id).count() == 1
+    assert MergeAttempt.objects.filter(run_id=run_id).count() == 1
+
+
+@pytest.mark.django_db(transaction=True)
+def test_expired_active_run_cannot_be_revived_by_renewal(merge_flow):
+    execution, _, run_id, _, _, _, _ = merge_flow
+    dispatcher, _, _, _, _, _, _, _, _, prefix = execution
+    expired_at = timezone.now() - timedelta(seconds=1)
+    AgentRun.objects.filter(pk=run_id).update(lease_expires_at=expired_at)
+    assert dispatcher.post(prefix + f"runs/{run_id}/renew/", {}, format="json").status_code == 403
+    assert AgentRun.objects.get(pk=run_id).lease_expires_at == expired_at

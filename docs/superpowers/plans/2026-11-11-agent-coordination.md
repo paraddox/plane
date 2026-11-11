@@ -170,7 +170,7 @@ creation surfaces, project settings/releases, shared services/types, docs.
 
 ## Final Evidence
 
-- 355 backend API/authentication/security/coordination tests passed with actual
+- 359 backend API/authentication/security/coordination tests passed with actual
   PostgreSQL migrations and Valkey, including the real-HTTP GitHub fixture and
   concurrent claim/credential/revocation checks. Schema validation is included.
 - Main migration 0122 upgraded through 0129 with existing tasks and hashed keys
@@ -195,7 +195,34 @@ Limits: GitHub write behavior is verified with HTTP fixtures, not a live App
 installation; operator-specific repository protections require staging validation
 before production enablement. Existing app-shell hydration warnings appeared in
 browser runs, while coordination interactions passed without other page errors.
-No production deployment, commit, push, or new-branch PR/merge was performed.
+At the initial implementation handoff, no production deployment, commit, push,
+or new-branch PR/merge had been performed.
+
+## PR Review
+
+Published as draft PR #3: https://github.com/paraddox/plane/pull/3.
+Review compares the full branch against main at 22af73e7450c752cd153ccb455d8cba889af1c55.
+
+Two recovery findings were reproduced with failing regressions and fixed:
+
+- An earlier definite rejection could erase a concurrent retry's uncertainty
+  fence. Retry admission now persists uncertainty before the remote write, and
+  rejection cannot downgrade it. Tests cover rejection before and after the
+  overlapping retry's result; cancellation remains blocked.
+- An expired lease left a pending merge impossible for its assigned agent to
+  recover. Only the owning, still-authorized dispatcher can restore the same
+  fenced run's lease and rotate its credential. Expired active runs remain
+  non-renewable and must follow the ordinary reclaim path.
+
+The focused execution/merge/provider/end-to-end suite passed 61 tests after these
+fixes; the complete API/auth/security regression suite then passed all 359 tests,
+and web type checking passed. No verified review findings remain unresolved.
+Initial commit hooks also passed after two
+existing shadowed callback parameters in the affected issue detail file were
+renamed. The repository's hosted PR build/lint workflows target `preview`, not
+`main`; PR #3 currently has no hosted checks, so local results are not presented
+as hosted CI success. Live provider staging and the existing app-shell warning
+limitations above remain unchanged. This PR is not merged or deployed.
 
 ## Execution Notes
 

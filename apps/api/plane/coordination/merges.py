@@ -133,6 +133,11 @@ def prepare_merge(request, project, run_id, expected):
                 or attempt.pull_request != run.pull_request
             ):
                 raise CoordinationConflict("The pending merge does not match this execution.")
+            # A retry may outlive the original call. Its admission makes a later
+            # rejection of that original call insufficient to clear the fence.
+            if attempt.status == "prepared":
+                attempt.status = "uncertain"
+                attempt.save(update_fields=["status", "updated_at"])
             return run, attempt, confirmation, provider, True
         attempt = MergeAttempt.objects.create(
             project=project,
@@ -175,7 +180,7 @@ def record_uncertain(project, run_id, attempt_id):
 def reject_merge(project, run_id, attempt_id):
     run = locked_run(project, run_id)
     attempt = MergeAttempt.objects.select_for_update().get(pk=attempt_id, run=run)
-    if attempt.status == "confirmed":
+    if attempt.status in ("confirmed", "uncertain"):
         return run
     attempt.status, attempt.error, attempt.finished_at = "failed", str(MergeRejected.default_detail), timezone.now()
     attempt.save(update_fields=["status", "error", "finished_at", "updated_at"])
@@ -257,7 +262,9 @@ def request_merge(request, project, run_id):
             return confirm_merge(project, run_id, attempt.pk, confirmation)
         if pending:
             return record_uncertain(project, run_id, attempt.pk)
-        reject_merge(project, run_id, attempt.pk)
+        result = reject_merge(project, run_id, attempt.pk)
+        if result.status != AgentRun.Status.ACTIVE:
+            return result
         raise
     except ProviderUnavailable:
         return record_uncertain(project, run_id, attempt.pk)

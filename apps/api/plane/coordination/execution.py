@@ -121,10 +121,12 @@ class RunSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
-def validate_live_run(run):
+def validate_live_run(run, *, allow_expired_merging=False):
     if run.project.deleted_at or run.project.archived_at or run.project.workspace.deleted_at:
         raise PermissionDenied("This project is no longer open for execution.")
-    if run.status not in (AgentRun.Status.ACTIVE, AgentRun.Status.MERGING) or run.lease_expires_at <= timezone.now():
+    if run.status not in (AgentRun.Status.ACTIVE, AgentRun.Status.MERGING) or (
+        run.lease_expires_at <= timezone.now() and not (allow_expired_merging and run.status == AgentRun.Status.MERGING)
+    ):
         raise PermissionDenied("This execution is no longer authorized.")
     if run.contract.deleted_at or run.contract.issue.deleted_at or run.contract.spec_revision != run.spec_revision:
         raise PermissionDenied("The execution specification is no longer current.")
@@ -314,7 +316,9 @@ def renew_execution(request, project, run_id):
     run = locked_run(project, run_id)
     if run.dispatcher_id != parent.pk:
         raise PermissionDenied("This run belongs to another dispatcher.")
-    validate_live_run(run)
+    # Pending merges cannot be reassigned; their dispatcher can restore the same
+    # agent's lease without reviving an expired, reclaimable active execution.
+    validate_live_run(run, allow_expired_merging=True)
     run.lease_expires_at = timezone.now() + execution_policy(project).execution_lease
     run.save(update_fields=["lease_expires_at", "updated_at"])
     return run
