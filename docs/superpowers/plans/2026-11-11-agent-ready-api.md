@@ -23,8 +23,8 @@ Base: main at 739bbd818. Working branch: codex/agent-ready-api.
 - [x] Write safety: durable idempotency, work-item conflict protection, useful bulk action, focused concurrent-request tests.
 - [x] Integration: model registration, ordered safe migrations/backfill, production environment/schema configuration.
 - [x] Documentation: agent authentication, permissions/scopes, supported workflows, retries, bulk use, rate control and Cloudflare/API deployment checks.
-- [x] Verification: 260 isolated PostgreSQL/Valkey regression tests passed, migration upgrade and consistency checks passed, OpenAPI validated, affected frontend types and lint passed.
-- [ ] Delivery: commit, push, create PR, review the full diff, resolve blocking findings and verify the final result.
+- [x] Verification: 260 isolated PostgreSQL/Valkey regression tests passed; the final review fix passed all 87 business tests including its new regression. Migration upgrade and consistency checks passed, OpenAPI validated, affected frontend types and lint passed.
+- [x] Delivery: committed and pushed; draft PR #2 opened and reviewed; blocking findings resolved and verified. No production deployment or merge performed.
 
 ## Ownership
 
@@ -40,3 +40,6 @@ Use disposable local PostgreSQL and Valkey containers bound to random loopback p
 - Recheck current roles, ownership, visibility, and retained soft-delete metadata before replay. If required metadata is purged, deny replay rather than disclose cached results.
 - Reject Idempotency-Key on workspace deletion before mutation because deletion rewrites the workspace slug; document this exception in the schema and agent guide.
 - Keep the existing deployment rate defaults until workload measurements justify changing them; operators can grant explicit per-key rates.
+- Published-PR review caught project-view deletion replay accepting a workspace-admin fallback after loss of project-admin status. The replay now enforces the handler's exact project-admin-or-owner rule; the regression downgrades only the project role.
+
+Review outcome: no remaining blocking findings within the implemented scope. GitHub reported no hosted checks for this PR; verification evidence is local. Production Cloudflare behavior and VPS capacity remain deployment checks.
