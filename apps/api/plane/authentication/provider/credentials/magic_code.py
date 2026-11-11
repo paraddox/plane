@@ -16,7 +16,32 @@ from plane.authentication.adapter.error import (
     AUTHENTICATION_ERROR_CODES,
     AuthenticationException,
 )
+from plane.authentication.rate_limit import MAGIC_CODE_FAILED_ATTEMPT_LIMIT
 from plane.db.models import User
+
+
+# Keep verification, failure counting, and consumption in one atomic Redis operation.
+VERIFY_MAGIC_CODE_SCRIPT = """
+local value = redis.call("GET", KEYS[1])
+if not value then
+    return {"expired"}
+end
+
+local data = cjson.decode(value)
+if tostring(data.token) == ARGV[1] then
+    redis.call("DEL", KEYS[1])
+    return {"valid", data.email}
+end
+
+data.failed_attempt = (tonumber(data.failed_attempt) or 0) + 1
+if data.failed_attempt >= tonumber(ARGV[2]) then
+    redis.call("DEL", KEYS[1])
+    return {"exhausted"}
+end
+
+redis.call("SET", KEYS[1], cjson.encode(data), "KEEPTTL")
+return {"invalid"}
+"""
 
 
 class MagicCodeProvider(CredentialAdapter):
@@ -65,7 +90,7 @@ class MagicCodeProvider(CredentialAdapter):
 
             current_attempt = data["current_attempt"] + 1
 
-            if data["current_attempt"] > 2:
+            if current_attempt > 2:
                 email = str(self.key).replace("magic_", "", 1)
                 if User.objects.filter(email=email).exists():
                     raise AuthenticationException(
@@ -83,12 +108,13 @@ class MagicCodeProvider(CredentialAdapter):
             value = {
                 "current_attempt": current_attempt,
                 "email": str(self.key),
+                "failed_attempt": 0,
                 "token": token,
             }
             expiry = 600
             ri.set(key, json.dumps(value), ex=expiry)
         else:
-            value = {"current_attempt": 0, "email": self.key, "token": token}
+            value = {"current_attempt": 0, "email": self.key, "failed_attempt": 0, "token": token}
             expiry = 600
 
             ri.set(key, json.dumps(value), ex=expiry)
@@ -96,52 +122,34 @@ class MagicCodeProvider(CredentialAdapter):
 
     def set_user_data(self):
         ri = redis_instance()
-        if ri.exists(self.key):
-            data = json.loads(ri.get(self.key))
-            token = data["token"]
-            email = data["email"]
+        result = ri.eval(VERIFY_MAGIC_CODE_SCRIPT, 1, self.key, str(self.code), MAGIC_CODE_FAILED_ATTEMPT_LIMIT)
+        verification_status = result[0].decode("utf-8")
 
-            if str(token) == str(self.code):
-                super().set_user_data(
-                    {
-                        "email": email,
-                        "user": {
-                            "avatar": "",
-                            "first_name": "",
-                            "last_name": "",
-                            "provider_id": "",
-                            "is_password_autoset": True,
-                        },
-                    }
-                )
-                # Delete the token from redis if the code match is successful
-                ri.delete(self.key)
-                return
-            else:
-                email = str(self.key).replace("magic_", "", 1)
-                if User.objects.filter(email=email).exists():
-                    raise AuthenticationException(
-                        error_code=AUTHENTICATION_ERROR_CODES["INVALID_MAGIC_CODE_SIGN_IN"],
-                        error_message="INVALID_MAGIC_CODE_SIGN_IN",
-                        payload={"email": str(email)},
-                    )
-                else:
-                    raise AuthenticationException(
-                        error_code=AUTHENTICATION_ERROR_CODES["INVALID_MAGIC_CODE_SIGN_UP"],
-                        error_message="INVALID_MAGIC_CODE_SIGN_UP",
-                        payload={"email": str(email)},
-                    )
-        else:
-            email = str(self.key).replace("magic_", "", 1)
-            if User.objects.filter(email=email).exists():
-                raise AuthenticationException(
-                    error_code=AUTHENTICATION_ERROR_CODES["EXPIRED_MAGIC_CODE_SIGN_IN"],
-                    error_message="EXPIRED_MAGIC_CODE_SIGN_IN",
-                    payload={"email": str(email)},
-                )
-            else:
-                raise AuthenticationException(
-                    error_code=AUTHENTICATION_ERROR_CODES["EXPIRED_MAGIC_CODE_SIGN_UP"],
-                    error_message="EXPIRED_MAGIC_CODE_SIGN_UP",
-                    payload={"email": str(email)},
-                )
+        if verification_status == "valid":
+            super().set_user_data(
+                {
+                    "email": result[1].decode("utf-8"),
+                    "user": {
+                        "avatar": "",
+                        "first_name": "",
+                        "last_name": "",
+                        "provider_id": "",
+                        "is_password_autoset": True,
+                    },
+                }
+            )
+            return
+
+        email = str(self.key).replace("magic_", "", 1)
+        error_prefix = {
+            "expired": "EXPIRED_MAGIC_CODE",
+            "invalid": "INVALID_MAGIC_CODE",
+            "exhausted": "EMAIL_CODE_ATTEMPT_EXHAUSTED",
+        }[verification_status]
+        auth_type = "SIGN_IN" if User.objects.filter(email=email).exists() else "SIGN_UP"
+        error_message = f"{error_prefix}_{auth_type}"
+        raise AuthenticationException(
+            error_code=AUTHENTICATION_ERROR_CODES[error_message],
+            error_message=error_message,
+            payload={"email": email},
+        )

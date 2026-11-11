@@ -5,12 +5,25 @@
  */
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import type { AxiosInstance, AxiosRequestConfig } from "axios";
-import axios from "axios";
+import type { AxiosError, AxiosInstance, AxiosRequestConfig, InternalAxiosRequestConfig } from "axios";
+import axios, { AxiosHeaders } from "axios";
+
+const CSRF_TOKEN_PATH = "/auth/get-csrf-token/";
+const CSRF_PROTECTED_METHODS = new Set(["post", "put", "patch", "delete"]);
+
+type CSRFTokenResponse = {
+  csrf_token?: string;
+};
+
+type CSRFRequestConfig = InternalAxiosRequestConfig & {
+  csrfRetry?: boolean;
+};
 
 export abstract class APIService {
   protected baseURL: string;
   private axiosInstance: AxiosInstance;
+  private csrfToken?: string;
+  private csrfTokenPromise?: Promise<string | undefined>;
 
   constructor(baseURL: string) {
     this.baseURL = baseURL;
@@ -20,6 +33,7 @@ export abstract class APIService {
     });
 
     this.setupInterceptors();
+    this.setupCSRFInterceptor();
   }
 
   private setupInterceptors() {
@@ -33,6 +47,90 @@ export abstract class APIService {
         return Promise.reject(error);
       }
     );
+  }
+
+  private setupCSRFInterceptor() {
+    this.axiosInstance.interceptors.request.use(async (config: InternalAxiosRequestConfig) => {
+      if (!this.isCSRFProtectedRequest(config)) return config;
+
+      const headers = AxiosHeaders.from(config.headers);
+      if (headers.has("X-CSRFTOKEN") || headers.has("X-CSRF-TOKEN")) return config;
+
+      const csrfToken = await this.getCSRFToken();
+      if (csrfToken) {
+        headers.set("X-CSRFTOKEN", csrfToken);
+        config.headers = headers;
+      }
+
+      return config;
+    });
+
+    this.axiosInstance.interceptors.response.use(undefined, async (error: AxiosError<{ detail?: string }>) => {
+      const config = error.config as CSRFRequestConfig | undefined;
+      const detail = error.response?.data?.detail;
+      if (
+        !config ||
+        config.csrfRetry ||
+        !this.isCSRFProtectedRequest(config) ||
+        error.response?.status !== 403 ||
+        typeof detail !== "string" ||
+        !detail.startsWith("CSRF Failed:")
+      ) {
+        throw error;
+      }
+
+      // Django rejects CSRF before the view runs, so refreshing cannot duplicate a write.
+      config.csrfRetry = true;
+      this.csrfToken = undefined;
+      const csrfToken = await this.getCSRFToken();
+      if (!csrfToken) throw error;
+
+      config.headers = AxiosHeaders.from(config.headers);
+      config.headers.set("X-CSRFTOKEN", csrfToken);
+      return this.axiosInstance.request(config);
+    });
+  }
+
+  private isCSRFProtectedRequest(config: InternalAxiosRequestConfig) {
+    const method = config.method?.toLowerCase();
+    if (!method || !CSRF_PROTECTED_METHODS.has(method)) return false;
+    if (config.withCredentials === false) return false;
+
+    const url = config.url ?? "";
+    if (url.includes(CSRF_TOKEN_PATH)) return false;
+    if (this.isExternalURL(url)) return false;
+
+    return true;
+  }
+
+  private isExternalURL(url: string) {
+    if (!/^https?:\/\//i.test(url)) return false;
+
+    const baseURL = this.baseURL.replace(/\/$/, "");
+    return !baseURL || !url.startsWith(baseURL);
+  }
+
+  private async getCSRFToken() {
+    if (this.csrfToken) return this.csrfToken;
+
+    if (!this.csrfTokenPromise) {
+      const tokenURL = `${this.baseURL.replace(/\/$/, "")}${CSRF_TOKEN_PATH}`;
+      this.csrfTokenPromise = axios
+        .get<CSRFTokenResponse>(tokenURL, {
+          withCredentials: true,
+          validateStatus: null,
+        })
+        .then((response) => {
+          const csrfToken = response.data?.csrf_token;
+          if (csrfToken) this.csrfToken = csrfToken;
+          return csrfToken;
+        })
+        .finally(() => {
+          this.csrfTokenPromise = undefined;
+        });
+    }
+
+    return this.csrfTokenPromise;
   }
 
   get(url: string, params = {}, config: AxiosRequestConfig = {}) {

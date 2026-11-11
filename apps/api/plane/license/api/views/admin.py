@@ -37,6 +37,7 @@ from plane.authentication.adapter.error import (
     AUTHENTICATION_ERROR_CODES,
     AuthenticationException,
 )
+from plane.authentication.rate_limit import authentication_rate_limit_response
 from plane.utils.ip_address import get_client_ip
 from plane.utils.path_validator import get_safe_redirect_url
 
@@ -123,6 +124,13 @@ class InstanceAdminSignUpEndpoint(View):
         last_name = request.POST.get("last_name", "")
         company_name = request.POST.get("company_name", "")
         is_telemetry_enabled = request.POST.get("is_telemetry_enabled", True)
+        rate_limit_response = authentication_rate_limit_response(
+            request=request,
+            scope="admin_sign_up",
+            identifier=email,
+        )
+        if rate_limit_response:
+            return rate_limit_response
 
         # return error if the email and password is not present
         if not email or not password or not first_name:
@@ -260,6 +268,13 @@ class InstanceAdminSignInEndpoint(View):
         # Get email and password
         email = request.POST.get("email", False)
         password = request.POST.get("password", False)
+        rate_limit_response = authentication_rate_limit_response(
+            request=request,
+            scope="admin_sign_in",
+            identifier=email,
+        )
+        if rate_limit_response:
+            return rate_limit_response
 
         # return error if the email and password is not present
         if not email or not password:
