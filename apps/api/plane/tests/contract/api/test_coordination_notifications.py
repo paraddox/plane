@@ -10,7 +10,15 @@ import pytest
 from django.db import transaction
 from django.utils import timezone
 
-from plane.db.models import AgentEventDelivery, AgentSubscription, CoordinationEvent, FileAsset, Issue
+from plane.db.models import (
+    AgentEventDelivery,
+    AgentSubscription,
+    CoordinationEvent,
+    FileAsset,
+    Issue,
+    Module,
+    ModuleIssue,
+)
 from .test_coordination_contracts import coordination as coordination
 from .test_coordination_execution import execution as execution
 from .test_coordination_handoff import handoff
@@ -288,3 +296,32 @@ def test_worker_gets_child_feedback_and_only_downloads_granted_uploaded_assets(
     deliveries = AgentEventDelivery.objects.filter(subscription_id=subscription.data["id"])
     assert set(deliveries.values_list("event__kind", flat=True)) == {"comment.created", "attachment.uploaded"}
     assert set(deliveries.values_list("event__issue_id", flat=True)) == {feedback.issue_id}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("operation", ["task_add", "module_add", "task_remove", "module_remove"])
+def test_browser_module_changes_notify_assigned_worker(execution, callback_network, operation):
+    worker, _, _ = handoff(execution)
+    _, human, project, issue, _, _, _, _, _, prefix = execution
+    module = Module.objects.create(project=project, name="Feature scope")
+    if operation.endswith("remove"):
+        ModuleIssue.objects.create(project=project, issue=issue, module=module)
+    subscription = subscribe(worker, prefix)
+    base = f"/api/workspaces/{project.workspace.slug}/projects/{project.pk}/"
+    if operation.startswith("task_"):
+        data = {"modules" if operation == "task_add" else "removed_modules": [str(module.pk)]}
+        response = human.post(base + f"issues/{issue.pk}/modules/", data, format="json")
+        assert response.status_code == 201, response.data
+    elif operation == "module_add":
+        response = human.post(base + f"modules/{module.pk}/issues/", {"issues": [str(issue.pk)]}, format="json")
+        assert response.status_code == 201, response.data
+    else:
+        response = human.delete(base + f"modules/{module.pk}/issues/{issue.pk}/")
+        assert response.status_code == 204, getattr(response, "data", None)
+    delivery = AgentEventDelivery.objects.filter(
+        subscription_id=subscription.data["id"], event__kind="task.modules_changed"
+    )
+    assert delivery.count() == 1
+    event = delivery.get().event
+    expected = "added" if operation.endswith("add") else "removed"
+    assert event.payload[expected] == [str(module.pk)]

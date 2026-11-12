@@ -7,9 +7,9 @@ from django.db import close_old_connections
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from plane.db.models import AgentRun, APIToken, State, WorkItemContract
+from plane.db.models import AgentRun, APIToken, Issue, State, WorkItemContract
 from .test_coordination_contracts import coordination as coordination
-from .test_coordination_execution import claim, execution as execution
+from .test_coordination_execution import claim, execution as execution, worker_client
 
 
 def handoff(execution):
@@ -156,6 +156,60 @@ def test_cancelling_through_normal_task_state_closes_assignment(execution):
     assert response.status_code == 200, response.data
     assert refresh(execution, worker, run_id).status_code == 403
     assert not APIToken.objects.filter(agent_run_id=run_id, is_active=True).exists()
+
+
+@pytest.mark.django_db
+def test_cancelling_unassigned_task_preserves_same_request_spec_edits(execution):
+    _, human, project, issue, contract, _, _, _, _, _ = execution
+    cancelled = State.objects.create(project=project, name="Cancelled", group="cancelled", color="#777777")
+    detail = f"/api/workspaces/{project.workspace.slug}/projects/{project.pk}/issues/{issue.pk}/"
+    response = human.patch(
+        detail,
+        {
+            "state": str(cancelled.pk),
+            "expected_revision": 1,
+            "requirements": "Final scope before cancellation",
+            "definition_of_done": [{"description": "Retain the edited acceptance criterion"}],
+        },
+        format="json",
+    )
+    assert response.status_code == 200, response.data
+    contract.refresh_from_db()
+    assert contract.spec_revision == 2
+    assert contract.status == "cancelled"
+    assert contract.requirements == "Final scope before cancellation"
+    assert contract.definition_of_done[0]["description"] == "Retain the edited acceptance criterion"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("transport", ["session", "execution"])
+def test_null_state_patch_uses_default_without_crashing_cancellation_logic(execution, transport):
+    _, human, project, issue, _, _, _, _, _, _ = execution
+    client = human
+    if transport == "execution":
+        client, _ = worker_client(execution, claim(execution))
+        detail = f"/api/v1/workspaces/{project.workspace.slug}/projects/{project.pk}/work-items/{issue.pk}/"
+    else:
+        detail = f"/api/workspaces/{project.workspace.slug}/projects/{project.pk}/issues/{issue.pk}/"
+    client.raise_request_exception = False
+    response = client.patch(detail, {"state": None}, format="json")
+    assert response.status_code == 200, getattr(response, "data", None)
+    assert Issue.objects.get(pk=issue.pk).state.group == "unstarted"
+
+
+@pytest.mark.django_db
+def test_clearing_cancelled_state_reopens_the_task_with_its_default_state(execution):
+    _, human, project, issue, contract, _, _, _, _, _ = execution
+    cancelled = State.objects.create(project=project, name="Cancelled", group="cancelled", color="#777777")
+    detail = f"/api/workspaces/{project.workspace.slug}/projects/{project.pk}/issues/{issue.pk}/"
+    assert human.patch(detail, {"state": str(cancelled.pk)}, format="json").status_code == 200
+    contract.refresh_from_db()
+    assert contract.status == "cancelled"
+    response = human.patch(detail, {"state": None}, format="json")
+    assert response.status_code == 200, response.data
+    contract.refresh_from_db()
+    assert contract.status == "ready"
+    assert Issue.objects.get(pk=issue.pk).state.group == "unstarted"
 
 
 @pytest.mark.django_db(transaction=True)

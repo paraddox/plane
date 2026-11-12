@@ -99,6 +99,7 @@ class TaskFieldsSerializer(TaskIntentSerializer):
             issue = super().save(**kwargs)
         finally:
             self._validated_data = original
+        state = issue.state if "state" in values else None
         if creating:
             contract = ensure_task_contract(issue)
             if contract and intent:
@@ -109,7 +110,7 @@ class TaskFieldsSerializer(TaskIntentSerializer):
             if "release" in intent:
                 intent["release"] = str(intent["release"].pk) if intent["release"] else None
             intent["expected_revision"] = expected if intent else (contract.spec_revision if contract else None)
-            edit_contract(request, issue.project, issue.pk, intent, material_change=description_changed)
+            contract, _ = edit_contract(request, issue.project, issue.pk, intent, material_change=description_changed)
         elif (
             contract
             and not issue.is_draft
@@ -117,8 +118,8 @@ class TaskFieldsSerializer(TaskIntentSerializer):
                 contract.status == "draft"
                 or (
                     contract.status == "cancelled"
-                    and "state" in values
-                    and values["state"].group in ("backlog", "unstarted", "started")
+                    and state is not None
+                    and state.group in ("backlog", "unstarted", "started")
                 )
             )
         ):
@@ -126,7 +127,7 @@ class TaskFieldsSerializer(TaskIntentSerializer):
             contract.save(update_fields=["status", "updated_at"])
             emit_event(issue.project, "task.ready", actor=request.user, issue=issue, revision=contract.spec_revision)
         issue._state.fields_cache.pop("coordination_contract", None)
-        if contract and "state" in values and values["state"].group == "cancelled":
+        if contract and state is not None and state.group == "cancelled":
             from .execution import cancel_execution
             from .contracts import clear_advance_authorization
             from plane.db.models import AgentRun

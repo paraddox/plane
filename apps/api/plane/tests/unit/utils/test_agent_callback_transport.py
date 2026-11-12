@@ -60,6 +60,30 @@ def test_callback_pins_validated_address_and_preserves_tls_identity(settings, mo
     assert pool.urlopen.call_args.kwargs["retries"] is False
 
 
+@pytest.mark.parametrize("unreachable", ["93.184.216.34", "2606:4700:4700::1111"])
+def test_callback_tries_other_validated_addresses_when_one_is_unreachable(settings, monkeypatch, unreachable):
+    settings.WEBHOOK_ALLOWED_IPS = []
+    reachable = "93.184.216.35"
+    resolver = Mock(
+        return_value=[
+            (10 if ":" in unreachable else 2, 1, 6, "", (unreachable, 443)),
+            (2, 1, 6, "", (reachable, 443)),
+        ]
+    )
+    monkeypatch.setattr(notifications.socket, "getaddrinfo", resolver)
+    failed, working = Mock(), Mock()
+    failed.urlopen.side_effect = OSError("Network is unreachable")
+    working.urlopen.return_value.status = 204
+    pools = Mock(side_effect=lambda address, **_: working if address == reachable else failed)
+    monkeypatch.setattr(notifications.urllib3, "HTTPSConnectionPool", pools)
+    assert notifications.send_callback("https://worker.example.test/callback", b"{}", {}) == 204
+    assert [call.args[0] for call in pools.call_args_list] == [unreachable, reachable]
+    resolver.assert_called_once()
+    assert all(call.kwargs["server_hostname"] == "worker.example.test" for call in pools.call_args_list)
+    assert working.urlopen.call_args.kwargs["headers"]["Host"] == "worker.example.test"
+    failed.close.assert_called_once()
+
+
 @pytest.mark.parametrize(
     "url",
     [

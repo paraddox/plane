@@ -4,22 +4,21 @@
 
 # Python imports
 import copy
-import json
 
+from django.db import transaction
 from django.db.models import F, Func, OuterRef, Q, Subquery
 
 # Django Imports
-from django.utils import timezone
 from django.utils.decorators import method_decorator
 from django.views.decorators.gzip import gzip_page
 
 # Third party imports
-from rest_framework import status
+from rest_framework import serializers, status
 from rest_framework.response import Response
 
 from plane.app.permissions import allow_permission, ROLE
 from plane.app.serializers import ModuleIssueSerializer
-from plane.bgtasks.issue_activities_task import issue_activity
+from plane.coordination.modules import ModuleAssignmentSerializer, assign_modules
 from plane.db.models import (
     Issue,
     FileAsset,
@@ -39,7 +38,6 @@ from plane.utils.paginator import GroupedOffsetPaginator, SubGroupedOffsetPagina
 from plane.utils.filters import ComplexFilterBackend
 from plane.utils.filters import IssueFilterSet
 from .. import BaseViewSet
-from plane.utils.host import base_host
 
 
 class ModuleIssueViewSet(BaseViewSet):
@@ -207,131 +205,34 @@ class ModuleIssueViewSet(BaseViewSet):
             )
 
     @allow_permission([ROLE.ADMIN, ROLE.MEMBER])
+    @transaction.atomic
     # create multiple issues inside a module
     def create_module_issues(self, request, slug, project_id, module_id):
         issues = request.data.get("issues", [])
         if not issues:
             return Response({"error": "Issues are required"}, status=status.HTTP_400_BAD_REQUEST)
+        issues = serializers.ListField(child=serializers.UUIDField()).run_validation(issues)
         project = Project.objects.get(pk=project_id)
-        _ = ModuleIssue.objects.bulk_create(
-            [
-                ModuleIssue(
-                    issue_id=str(issue),
-                    module_id=module_id,
-                    project_id=project_id,
-                    workspace_id=project.workspace_id,
-                    created_by=request.user,
-                    updated_by=request.user,
-                )
-                for issue in issues
-            ],
-            batch_size=10,
-            ignore_conflicts=True,
-        )
-        # Bulk Update the activity
-        _ = [
-            issue_activity.delay(
-                type="module.activity.created",
-                requested_data=json.dumps({"module_id": str(module_id)}),
-                actor_id=str(request.user.id),
-                issue_id=str(issue),
-                project_id=project_id,
-                current_instance=None,
-                epoch=int(timezone.now().timestamp()),
-                notification=True,
-                origin=base_host(request=request, is_app=True),
-            )
-            for issue in issues
-        ]
+        for issue_id in sorted(set(issues)):
+            assign_modules(request, project, issue_id, [module_id], [])
         return Response({"message": "success"}, status=status.HTTP_201_CREATED)
 
     @allow_permission([ROLE.ADMIN, ROLE.MEMBER])
     # add multiple module inside an issue and remove multiple modules from an issue
     def create_issue_modules(self, request, slug, project_id, issue_id):
-        modules = request.data.get("modules", [])
-        removed_modules = request.data.get("removed_modules", [])
+        serializer = ModuleAssignmentSerializer(
+            data={
+                "added": request.data.get("modules", []),
+                "removed": request.data.get("removed_modules", []),
+            }
+        )
+        serializer.is_valid(raise_exception=True)
         project = Project.objects.get(pk=project_id)
-
-        if modules:
-            _ = ModuleIssue.objects.bulk_create(
-                [
-                    ModuleIssue(
-                        issue_id=issue_id,
-                        module_id=module,
-                        project_id=project_id,
-                        workspace_id=project.workspace_id,
-                        created_by=request.user,
-                        updated_by=request.user,
-                    )
-                    for module in modules
-                ],
-                batch_size=10,
-                ignore_conflicts=True,
-            )
-            # Bulk Update the activity
-            _ = [
-                issue_activity.delay(
-                    type="module.activity.created",
-                    requested_data=json.dumps({"module_id": module}),
-                    actor_id=str(request.user.id),
-                    issue_id=issue_id,
-                    project_id=project_id,
-                    current_instance=None,
-                    epoch=int(timezone.now().timestamp()),
-                    notification=True,
-                    origin=base_host(request=request, is_app=True),
-                )
-                for module in modules
-            ]
-
-        for module_id in removed_modules:
-            module_issue = ModuleIssue.objects.filter(
-                workspace__slug=slug,
-                project_id=project_id,
-                module_id=module_id,
-                issue_id=issue_id,
-            )
-            issue_activity.delay(
-                type="module.activity.deleted",
-                requested_data=json.dumps({"module_id": str(module_id)}),
-                actor_id=str(request.user.id),
-                issue_id=str(issue_id),
-                project_id=str(project_id),
-                current_instance=json.dumps(
-                    {
-                        "module_name": (
-                            module_issue.first().module.name
-                            if (module_issue.first() and module_issue.first().module)
-                            else None
-                        )
-                    }
-                ),
-                epoch=int(timezone.now().timestamp()),
-                notification=True,
-                origin=base_host(request=request, is_app=True),
-            )
-            module_issue.delete()
-
+        assign_modules(request, project, issue_id, **serializer.validated_data)
         return Response({"message": "success"}, status=status.HTTP_201_CREATED)
 
     @allow_permission([ROLE.ADMIN, ROLE.MEMBER])
     def destroy(self, request, slug, project_id, module_id, issue_id):
-        module_issue = ModuleIssue.objects.filter(
-            workspace__slug=slug,
-            project_id=project_id,
-            module_id=module_id,
-            issue_id=issue_id,
-        )
-        issue_activity.delay(
-            type="module.activity.deleted",
-            requested_data=json.dumps({"module_id": str(module_id)}),
-            actor_id=str(request.user.id),
-            issue_id=str(issue_id),
-            project_id=str(project_id),
-            current_instance=json.dumps({"module_name": module_issue.first().module.name}),
-            epoch=int(timezone.now().timestamp()),
-            notification=True,
-            origin=base_host(request=request, is_app=True),
-        )
-        module_issue.delete()
+        project = Project.objects.get(pk=project_id)
+        assign_modules(request, project, issue_id, [], [module_id])
         return Response(status=status.HTTP_204_NO_CONTENT)

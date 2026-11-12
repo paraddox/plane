@@ -109,6 +109,21 @@ answer-editor changes, the standalone welcome page and unrelated security report
   are registered. The download integration found and fixed a raw-object-key
   response; a regression now requires the existing storage signing service.
 
+### Review Follow-up
+
+- Fixed cancellation overwriting specification edits made in the same request.
+- Fixed nullable state updates returning 500; cancellation/reopening now uses
+  the state actually saved by the task model.
+- Routed browser module assignment/removal through the shared transactional
+  service so the assigned worker receives the same events as API clients.
+- Callback transport now tries other validated DNS addresses on transport
+  failure, retaining address pinning, TLS hostname verification and no redirects.
+- Added ten regression cases. Final API/model/transport suite: 411 passed,
+  one schema test skipped by test settings. Python/browser lint and diff checks pass.
+- Rebuilt the local backend and verified deployed source hashes. Browser handoff,
+  answers, comments, module changes, uploads and spec refresh passed with main-agent
+  calls unchanged at 17 after handoff. No browser or receiver errors.
+
 ## Local Test Setup
 
 - App: `http://127.0.0.1:18130`

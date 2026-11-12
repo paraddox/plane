@@ -117,6 +117,22 @@ try {
   const commentEvent = await eventFor(issue, "comment.created", (data) => data.comment_id === comment.id);
   await receiptFor(issue, commentEvent, mainCalls);
 
+  const module = await api(project + "modules/", {
+    method: "POST",
+    status: 201,
+    data: { name: `Feedback scope ${issue}` },
+  });
+  await api(project + `issues/${issue}/modules/`, {
+    method: "POST",
+    status: 201,
+    data: { modules: [module.id] },
+  });
+  const moduleAdded = await eventFor(issue, "task.modules_changed", (data) => data.added.includes(module.id));
+  await receiptFor(issue, moduleAdded, mainCalls);
+  await api(project + `modules/${module.id}/issues/${issue}/`, { method: "DELETE", status: 204 });
+  const moduleRemoved = await eventFor(issue, "task.modules_changed", (data) => data.removed.includes(module.id));
+  await receiptFor(issue, moduleRemoved, mainCalls);
+
   const files = [
     { name: "human-feedback.png", mimeType: "image/png", buffer: await page.screenshot() },
     {
@@ -177,6 +193,7 @@ try {
     spec_revision: final.contract.spec_revision,
     answer_acknowledged: true,
     direct_comment_delivery: true,
+    direct_module_delivery: true,
     attachment_content_verified: true,
     assignment_preserved: true,
     page_errors: errors,

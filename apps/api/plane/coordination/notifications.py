@@ -61,7 +61,9 @@ def callback_destination(url):
     ):
         raise ValueError("Use an HTTPS callback URL without credentials or a fragment.")
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
-    addresses = {row[4][0] for row in socket.getaddrinfo(parsed.hostname, port, type=socket.SOCK_STREAM)}
+    addresses = list(
+        dict.fromkeys(row[4][0] for row in socket.getaddrinfo(parsed.hostname, port, type=socket.SOCK_STREAM))
+    )
     if not addresses:
         raise ValueError("The callback host has no addresses.")
     allowlisted = True
@@ -75,41 +77,45 @@ def callback_destination(url):
             raise ValueError("The callback destination is not publicly routable.")
     if parsed.scheme != "https" and not allowlisted:
         raise ValueError("Public callbacks require HTTPS.")
-    return parsed, sorted(addresses)[0], port
+    return parsed, addresses, port
 
 
 def send_callback(url, body, headers):
-    parsed, address, port = callback_destination(url)
+    parsed, addresses, port = callback_destination(url)
     host = parsed.hostname.encode("idna").decode("ascii")
     authority = f"[{host}]" if ":" in host else host
     if port != (443 if parsed.scheme == "https" else 80):
         authority += f":{port}"
     headers = {**headers, "Host": authority}
-    # Connect only to the validated IP; TLS still verifies the original hostname.
-    pool = (
-        urllib3.HTTPSConnectionPool(
-            address, port=port, server_hostname=host, assert_hostname=host, ssl_context=ssl.create_default_context()
-        )
-        if parsed.scheme == "https"
-        else urllib3.HTTPConnectionPool(address, port=port)
-    )
-    try:
-        response = pool.urlopen(
-            "POST",
-            (parsed.path or "/") + ("?" + parsed.query if parsed.query else ""),
-            body=body,
-            headers=headers,
-            redirect=False,
-            retries=False,
-            preload_content=False,
-            timeout=urllib3.Timeout(total=settings.COORDINATION_WEBHOOK_TIMEOUT),
+    # Try only validated IPs in resolver order; TLS verifies the original hostname.
+    for index, address in enumerate(addresses):
+        pool = (
+            urllib3.HTTPSConnectionPool(
+                address, port=port, server_hostname=host, assert_hostname=host, ssl_context=ssl.create_default_context()
+            )
+            if parsed.scheme == "https"
+            else urllib3.HTTPConnectionPool(address, port=port)
         )
         try:
-            return response.status
+            response = pool.urlopen(
+                "POST",
+                (parsed.path or "/") + ("?" + parsed.query if parsed.query else ""),
+                body=body,
+                headers=headers,
+                redirect=False,
+                retries=False,
+                preload_content=False,
+                timeout=urllib3.Timeout(total=settings.COORDINATION_WEBHOOK_TIMEOUT),
+            )
+            try:
+                return response.status
+            finally:
+                response.close()
+        except (OSError, urllib3.exceptions.HTTPError):
+            if index == len(addresses) - 1:
+                raise
         finally:
-            response.close()
-    finally:
-        pool.close()
+            pool.close()
 
 
 def event_envelope(event):
