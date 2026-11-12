@@ -59,3 +59,68 @@ test("pending operations disable answer editing", () => {
   assert.match(render({ answer: "Saved answer", busy: true }), /<button[^>]*disabled/);
   assert.match(render({ busy: true }), /<textarea[^>]*disabled/);
 });
+
+function MockCoordinationService() {
+  return {};
+}
+
+function renderPanel(data) {
+  const panelExports = {};
+  const panelSource = readFileSync(new URL("../core/components/coordination/task-panel.tsx", import.meta.url), "utf8");
+  const compiled = ts.transpileModule(panelSource, {
+    compilerOptions: { jsx: ts.JsxEmit.ReactJSX, module: ts.ModuleKind.CommonJS, esModuleInterop: true },
+  });
+  const mocks = {
+    swr: () => ({ data, error: new Error("Overview temporarily unavailable"), mutate: async () => {} }),
+    "@plane/constants": { API_BASE_URL: "" },
+    "@/services/coordination.service": { CoordinationService: MockCoordinationService },
+    "@/hooks/use-task-write-state": { useTaskWriteState: () => ({ pending: false }) },
+    "./helpers": { coordinationError: (error) => error.message },
+    "./question-answer": exports,
+    "@plane/propel/button": {
+      Button: ({ children, variant: _variant, ...props }) => createElement("button", props, children),
+    },
+  };
+  runInNewContext(compiled.outputText, {
+    exports: panelExports,
+    require: (specifier) => mocks[specifier] ?? require(specifier),
+  });
+  return renderToStaticMarkup(
+    createElement(panelExports.TaskCoordinationPanel, {
+      workspaceSlug: "workspace",
+      projectId: "project",
+      issueId: "task",
+      actorId: "owner",
+      creatorId: "owner",
+      members: [],
+      canAdmin: true,
+      canWrite: true,
+    })
+  );
+}
+
+test("overview refresh errors retain questions and disable writes while allowing refresh", () => {
+  const html = renderPanel({
+    contract: { owner_ids: ["owner"], status: "awaiting_input", spec_revision: 1 },
+    runs: [],
+    reviewers: [],
+    decisions: [],
+    children: [],
+    evidence: [],
+    merges: [],
+    questions: [{ id: "question", text: "Which audience?", answer: "", respondent: "owner", spec_revision: 1 }],
+  });
+  assert.match(html, /Which audience\?/);
+  assert.match(html, /Overview temporarily unavailable/);
+  assert.match(html, /<textarea[^>]*disabled/);
+  const refresh = html.match(/<button[^>]*aria-label="Refresh workflow"[^>]*>/)?.[0];
+  assert.ok(refresh);
+  assert.doesNotMatch(refresh, /disabled/);
+});
+
+test("an initial overview failure without cached data still offers Retry", () => {
+  const html = renderPanel(undefined);
+  assert.match(html, /Overview temporarily unavailable/);
+  assert.match(html, /Retry/);
+  assert.doesNotMatch(html, /<textarea/);
+});

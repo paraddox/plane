@@ -34,17 +34,22 @@ let question = {
   blocking: true,
 };
 let rejectSave = false;
+let rejectOverview = false;
+let rejectOverviewAfterSave = false;
 const submissions = [];
-await context.route("**" + overviewPath, (route) =>
-  route.fulfill({
+await context.route("**" + overviewPath, (route) => {
+  if (rejectOverview)
+    return route.fulfill({ status: 503, json: { detail: "Synthetic overview refresh unavailable." } });
+  return route.fulfill({
     json: { ...overview, questions: [question], contract: { ...overview.contract, status: "awaiting_input" } },
-  })
-);
+  });
+});
 await context.route("**" + root + `work-items/${fixture.issue}/questions/${question.id}/answer/`, async (route) => {
   const { text } = route.request().postDataJSON();
   submissions.push(text);
   if (rejectSave) return route.fulfill({ status: 503, json: { detail: "Synthetic answer service unavailable." } });
   question = { ...question, answer: text, answer_comment: randomUUID() };
+  rejectOverview = rejectOverviewAfterSave;
   return route.fulfill({ json: question });
 });
 const page = await context.newPage();
@@ -79,13 +84,36 @@ try {
   await panel.getByRole("alert").filter({ hasText: "Synthetic answer service unavailable." }).waitFor();
   assert.equal(await editor.inputValue(), updated, "A failed save must preserve the edit draft");
   rejectSave = false;
+  rejectOverviewAfterSave = true;
   await card.getByRole("button", { name: "Save answer", exact: true }).click();
+  const refreshError = page.getByRole("alert").filter({ hasText: "Synthetic overview refresh unavailable." }).last();
+  await refreshError.waitFor();
+  assert.equal(await card.count(), 1, "A refresh failure must not replace the question panel");
   await card
     .locator("p")
     .filter({ hasText: new RegExp(`^${updated}$`) })
     .waitFor();
   assert.equal(await editor.count(), 0);
   assert.equal(submissions.at(-1), updated);
+  rejectOverview = false;
+  rejectOverviewAfterSave = false;
+  await panel.getByRole("button", { name: "Refresh workflow", exact: true }).click();
+  await refreshError.waitFor({ state: "hidden" });
+  await card.getByRole("button", { name: "Edit answer", exact: true }).click();
+  const retainedDraft = "Keep this draft through a background refresh failure.";
+  await editor.fill(retainedDraft);
+  rejectOverview = true;
+  await panel.getByRole("button", { name: "Refresh workflow", exact: true }).click();
+  await refreshError.waitFor();
+  assert.equal(await editor.count(), 1, "A background refresh failure must retain the editor");
+  assert.equal(await editor.inputValue(), retainedDraft);
+  assert.equal(await editor.isDisabled(), true, "Stale context must disable writes until refresh succeeds");
+  rejectOverview = false;
+  await panel.getByRole("button", { name: "Refresh workflow", exact: true }).click();
+  await refreshError.waitFor({ state: "hidden" });
+  assert.equal(await editor.inputValue(), retainedDraft);
+  assert.equal(await editor.isDisabled(), false);
+  await card.getByRole("button", { name: "Cancel", exact: true }).click();
   await page.reload();
   await card
     .locator("p")
@@ -112,6 +140,8 @@ try {
       "cancel",
       "failed-save draft retention",
       "save collapse",
+      "saved answer survives refresh failure",
+      "background-refresh draft retention and recovery",
       "reload",
       "resolved read-only",
       "desktop/mobile",

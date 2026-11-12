@@ -52,7 +52,7 @@ export function TaskCoordinationPanel(props: TaskCoordinationPanelProps) {
     service.overview(workspaceSlug, projectId, issueId)
   );
   const [acting, setBusy] = useState(false);
-  const busy = acting || pending;
+  const busy = acting || pending || !!loadError;
   const [error, setError] = useState("");
   const [reviewComment, setReviewComment] = useState("");
   const [advancePending, setAdvancePending] = useState<boolean | null>(null);
@@ -92,7 +92,7 @@ export function TaskCoordinationPanel(props: TaskCoordinationPanelProps) {
         Loading execution...
       </section>
     );
-  if (loadError)
+  if (loadError && !data)
     return (
       <section className="border-y border-subtle py-5">
         <p role="alert">{coordinationError(loadError)}</p>
@@ -130,16 +130,16 @@ export function TaskCoordinationPanel(props: TaskCoordinationPanelProps) {
             className="grid size-8 shrink-0 place-items-center rounded hover:bg-layer-2"
             title="Refresh workflow"
             aria-label="Refresh workflow"
-            disabled={busy}
+            disabled={acting || pending}
             onClick={() => void mutate()}
           >
             <RefreshCw className="size-4" />
           </button>
         </div>
       </header>
-      {error && (
+      {(error || loadError) && (
         <p role="alert" className="break-words text-danger-primary">
-          {error}
+          {error || coordinationError(loadError)}
         </p>
       )}
       {contract && (
@@ -336,7 +336,19 @@ export function TaskCoordinationPanel(props: TaskCoordinationPanelProps) {
                       (question.respondent === actorId || isOwner)
                     }
                     onSubmit={(text) =>
-                      action(() => service.answer(workspaceSlug, projectId, issueId, question.id, text))
+                      action(async () => {
+                        const answered = await service.answer(workspaceSlug, projectId, issueId, question.id, text);
+                        await mutate(
+                          (current) =>
+                            current
+                              ? {
+                                  ...current,
+                                  questions: current.questions.map((row) => (row.id === answered.id ? answered : row)),
+                                }
+                              : current,
+                          { revalidate: false }
+                        );
+                      })
                     }
                   />
                 </div>
