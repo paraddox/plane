@@ -375,7 +375,7 @@ def test_unknown_provider_outcome_is_fenced_until_reconciled(merge_flow):
     assert human.post(session + f"runs/{run_id}/cancel/", {}, format="json").status_code == 409
     assert (
         human.patch(
-            session + f"work-items/{issue.pk}/contract/",
+            f"/api/workspaces/{contract.project.workspace.slug}/projects/{contract.project_id}/issues/{issue.pk}/",
             {"expected_revision": 1, "requirements": "Changed"},
             format="json",
         ).status_code

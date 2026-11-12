@@ -8,6 +8,7 @@ import { useEffect, useRef, useState } from "react";
 import { isEqual, xor } from "lodash-es";
 import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
+import { useSWRConfig } from "swr";
 // Plane imports
 import { useTranslation } from "@plane/i18n";
 import { TOAST_TYPE, setToast } from "@plane/propel/toast";
@@ -51,6 +52,7 @@ export const CreateUpdateIssueModalBase = observer(function CreateUpdateIssueMod
     showActionItemsOnUpdate = false,
   } = props;
   const issueStoreType = useIssueStoreType();
+  const { mutate } = useSWRConfig();
 
   let storeType = issueStoreFromProps ?? issueStoreType;
   // Fallback to project store if epic store is used in issue modal.
@@ -64,6 +66,7 @@ export const CreateUpdateIssueModalBase = observer(function CreateUpdateIssueMod
   const [createMore, setCreateMore] = useState(false);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [description, setDescription] = useState<string | undefined>(undefined);
+  const [taskIntent, setTaskIntent] = useState<Partial<TIssue>>({});
   const [uploadedAssetIds, setUploadedAssetIds] = useState<string[]>([]);
   const [isDuplicateModalOpen, setIsDuplicateModalOpen] = useState(false);
   // store hooks
@@ -84,23 +87,37 @@ export const CreateUpdateIssueModalBase = observer(function CreateUpdateIssueMod
   const projectIdFromRouter = getProjectByIdentifier(routerProjectIdentifier)?.id;
   const projectId = data?.project_id ?? routerProjectId?.toString() ?? projectIdFromRouter;
 
-  const fetchIssueDetail = async (issueId: string | undefined) => {
-    setDescription(undefined);
-    if (!workspaceSlug) return;
-
-    if (!projectId || issueId === undefined || !fetchIssueDetails) {
-      // Set description to the issue description from the props if available
-      setDescription(data?.description_html || "<p></p>");
-      return;
+  useEffect(() => {
+    if (!isOpen) return;
+    let active = true;
+    const issueId = data?.id ?? data?.sourceIssueId;
+    setDescription(issueId && fetchIssueDetails ? undefined : data?.description_html || "<p></p>");
+    setTaskIntent({});
+    if (workspaceSlug && projectId && issueId && fetchIssueDetails) {
+      void fetchIssue(workspaceSlug.toString(), projectId.toString(), issueId)
+        .then((response) => {
+          if (!active || !response) return;
+          setDescription(response.description_html || "<p></p>");
+          return setTaskIntent({
+            requirements: response.requirements ?? "",
+            definition_of_done: response.definition_of_done ?? [],
+            release_id: response.release_id ?? null,
+            spec_revision: response.spec_revision,
+          });
+        })
+        .catch((error) => {
+          if (!active) return;
+          console.error(error);
+          setToast({ type: TOAST_TYPE.ERROR, title: t("error"), message: "Unable to load task details." });
+        });
     }
-    const response = await fetchIssue(workspaceSlug.toString(), projectId.toString(), issueId);
-    if (response) setDescription(response?.description_html || "<p></p>");
-  };
+    return () => {
+      active = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, data?.id, data?.sourceIssueId, projectId, workspaceSlug, fetchIssueDetails]);
 
   useEffect(() => {
-    // fetching issue details
-    if (isOpen) fetchIssueDetail(data?.id ?? data?.sourceIssueId);
-
     // if modal is closed, reset active project to null
     // and return to avoid activeProjectId being set to some other project
     if (!isOpen) {
@@ -119,16 +136,14 @@ export const CreateUpdateIssueModalBase = observer(function CreateUpdateIssueMod
     if (allowedProjectIds && allowedProjectIds.length > 0 && !activeProjectId)
       setActiveProjectId(projectId?.toString() ?? allowedProjectIds?.[0]);
 
-    // clearing up the description state when we leave the component
-    return () => setDescription(undefined);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data?.project_id, data?.id, data?.sourceIssueId, projectId, isOpen, activeProjectId]);
 
-  const addIssueToCycle = async (issue: TIssue, cycleId: string) => {
+  const addIssueToCycle = async (issue: TIssue, targetCycleId: string) => {
     if (!workspaceSlug || !issue.project_id) return;
 
-    await issues.addIssueToCycle(workspaceSlug.toString(), issue.project_id, cycleId, [issue.id]);
-    fetchCycleDetails(workspaceSlug.toString(), issue.project_id, cycleId);
+    await issues.addIssueToCycle(workspaceSlug.toString(), issue.project_id, targetCycleId, [issue.id]);
+    fetchCycleDetails(workspaceSlug.toString(), issue.project_id, targetCycleId);
   };
 
   const addIssueToModule = async (issue: TIssue, moduleIds: string[]) => {
@@ -137,7 +152,8 @@ export const CreateUpdateIssueModalBase = observer(function CreateUpdateIssueMod
     await Promise.all([
       issues.changeModulesInIssue(workspaceSlug.toString(), issue.project_id, issue.id, moduleIds, []),
       ...moduleIds.map(
-        (moduleId) => issue.project_id && fetchModuleDetails(workspaceSlug.toString(), issue.project_id, moduleId)
+        (targetModuleId) =>
+          issue.project_id && fetchModuleDetails(workspaceSlug.toString(), issue.project_id, targetModuleId)
       ),
     ]);
   };
@@ -163,6 +179,9 @@ export const CreateUpdateIssueModalBase = observer(function CreateUpdateIssueMod
   ): Promise<TIssue | undefined> => {
     if (!workspaceSlug || !payload.project_id) return;
 
+    if (payload.definition_of_done) {
+      payload.definition_of_done = payload.definition_of_done.filter((item) => item.description.trim());
+    }
     try {
       let response: TIssue | undefined;
       // if draft issue, use draft issue store to create issue
@@ -260,20 +279,20 @@ export const CreateUpdateIssueModalBase = observer(function CreateUpdateIssueMod
     }
   };
 
-  const handleCycleChange = async (data: Partial<TIssue> | undefined, payload: Partial<TIssue>) => {
-    if (!workspaceSlug || !data?.project_id || !data?.id) return;
+  const handleCycleChange = async (sourceIssue: Partial<TIssue> | undefined, payload: Partial<TIssue>) => {
+    if (!workspaceSlug || !sourceIssue?.project_id || !sourceIssue?.id) return;
     // return if user is not trying to change the cycle, i.e
     // - cycle_id is not present in payload
     // - cycle_id is the same as the current cycle id
-    if (!("cycle_id" in payload) || isEqual(data?.cycle_id, payload.cycle_id)) return;
+    if (!("cycle_id" in payload) || isEqual(sourceIssue?.cycle_id, payload.cycle_id)) return;
 
     const slug = workspaceSlug.toString();
 
     // Removing the cycle
-    const currentCycleId = data?.cycle_id;
+    const currentCycleId = sourceIssue?.cycle_id;
     if (currentCycleId && payload.cycle_id === null) {
-      await issues.removeIssueFromCycle(slug, data.project_id, currentCycleId, data.id);
-      fetchCycleDetails(slug, data.project_id, currentCycleId).catch((error) => {
+      await issues.removeIssueFromCycle(slug, sourceIssue.project_id, currentCycleId, sourceIssue.id);
+      fetchCycleDetails(slug, sourceIssue.project_id, currentCycleId).catch((error) => {
         console.error(error);
       });
     }
@@ -281,12 +300,12 @@ export const CreateUpdateIssueModalBase = observer(function CreateUpdateIssueMod
     // Adding the cycle
     const newCycleId = payload.cycle_id;
     if (newCycleId && newCycleId !== "" && (payload.cycle_id !== cycleId || storeType !== EIssuesStoreType.CYCLE)) {
-      await addIssueToCycle(data as TBaseIssue, newCycleId);
+      await addIssueToCycle(sourceIssue as TBaseIssue, newCycleId);
     }
   };
 
-  const handleModuleChange = async (data: Partial<TIssue>, payload: Partial<TIssue>) => {
-    if (!workspaceSlug || !data?.project_id || !data?.id) return;
+  const handleModuleChange = async (sourceIssue: Partial<TIssue>, payload: Partial<TIssue>) => {
+    if (!workspaceSlug || !sourceIssue?.project_id || !sourceIssue?.id) return;
     // return if user is not trying to change the module, i.e
     // - module_ids is not present in payload
     // - module_ids is not an array
@@ -294,27 +313,27 @@ export const CreateUpdateIssueModalBase = observer(function CreateUpdateIssueMod
     if (
       !("module_ids" in payload) ||
       !Array.isArray(payload.module_ids) ||
-      isEqual(data?.module_ids, payload.module_ids)
+      isEqual(sourceIssue?.module_ids, payload.module_ids)
     )
       return;
 
-    const updatedModuleIds = xor(data.module_ids, payload.module_ids);
+    const updatedModuleIds = xor(sourceIssue.module_ids, payload.module_ids);
     const modulesToAdd: string[] = [];
     const modulesToRemove: string[] = [];
 
-    for (const moduleId of updatedModuleIds) {
-      if (data.module_ids?.includes(moduleId)) {
-        modulesToRemove.push(moduleId);
+    for (const changedModuleId of updatedModuleIds) {
+      if (sourceIssue.module_ids?.includes(changedModuleId)) {
+        modulesToRemove.push(changedModuleId);
       } else {
-        modulesToAdd.push(moduleId);
+        modulesToAdd.push(changedModuleId);
       }
     }
     // update modules if there are modules to add or remove
     if (modulesToAdd.length > 0 || modulesToRemove.length > 0) {
       await issues.changeModulesInIssue(
         workspaceSlug.toString(),
-        data.project_id,
-        data.id,
+        sourceIssue.project_id,
+        sourceIssue.id,
         modulesToAdd,
         modulesToRemove
       );
@@ -326,7 +345,10 @@ export const CreateUpdateIssueModalBase = observer(function CreateUpdateIssueMod
 
     try {
       if (isDraft) await draftIssues.updateIssue(workspaceSlug.toString(), data.id, payload);
-      else if (updateIssue) await updateIssue(payload.project_id, data.id, payload);
+      else if (updateIssue) {
+        await updateIssue(payload.project_id, data.id, payload);
+        await mutate(["task-coordination", workspaceSlug.toString(), payload.project_id, data.id]);
+      }
 
       // Run cycle, module, and property changes sequentially to avoid
       // optimistic store writes from racing against each other.
@@ -393,6 +415,7 @@ export const CreateUpdateIssueModalBase = observer(function CreateUpdateIssueMod
     issueTitleRef: issueTitleRef,
     data: {
       ...data,
+      ...taskIntent,
       description_html: description,
       cycle_id: data?.cycle_id ? data?.cycle_id : cycleId ? cycleId.toString() : null,
       module_ids: data?.module_ids ? data?.module_ids : moduleId ? [moduleId.toString()] : null,
@@ -410,6 +433,7 @@ export const CreateUpdateIssueModalBase = observer(function CreateUpdateIssueMod
     isDuplicateModalOpen: isDuplicateModalOpen,
     handleDuplicateIssueModal: handleDuplicateIssueModal,
     isProjectSelectionDisabled: isProjectSelectionDisabled,
+    dataResetProperties: [taskIntent],
   };
 
   return (

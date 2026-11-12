@@ -71,7 +71,7 @@ class WorkItemContract(ProjectBaseModel):
     requirements = models.TextField(blank=True)
     definition_of_done = models.JSONField(default=list)
     spec_revision = models.PositiveIntegerField(default=1)
-    status = models.CharField(max_length=24, choices=Status.choices, default=Status.DRAFT)
+    status = models.CharField(max_length=24, choices=Status.choices, default=Status.READY)
     auto_merge_authorized = models.BooleanField(default=False)
     auto_merge_revision = models.PositiveIntegerField(null=True, blank=True)
     auto_merge_authorized_by = models.ForeignKey(

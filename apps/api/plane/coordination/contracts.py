@@ -5,6 +5,7 @@
 from uuid import uuid4
 
 from django.db import transaction
+from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import serializers
@@ -16,8 +17,8 @@ from plane.db.models import (
     CoordinationEvent,
     CoordinationSequence,
     Issue,
+    IssueAssignee,
     Project,
-    ProjectExecutionPolicy,
     ProjectMember,
     ProjectRelease,
     User,
@@ -48,7 +49,7 @@ def authorized_project(request, slug, project_id, *, write=False):
 
 
 def require_human(request):
-    if not request.user.is_authenticated or request.user.is_bot or isinstance(request.auth, APIToken):
+    if not request.user.is_authenticated or request.user.is_bot or isinstance(getattr(request, "auth", None), APIToken):
         raise PermissionDenied("This operation requires an authenticated human session.")
 
 
@@ -63,6 +64,24 @@ def is_project_admin(user, project):
     return ProjectMember.objects.filter(project=project, member=user, is_active=True, role=20).exists()
 
 
+def task_owners(contract):
+    assignees = IssueAssignee.objects.filter(issue_id=contract.issue_id).values_list("assignee_id", flat=True)
+    members = ProjectMember.objects.filter(project=contract.project, is_active=True, role__gte=15).values("member_id")
+    workspace_members = WorkspaceMember.objects.filter(workspace=contract.project.workspace, is_active=True).values(
+        "member_id"
+    )
+    return User.objects.filter(
+        Q(pk=contract.issue.created_by_id or contract.owner_id) | Q(pk__in=assignees),
+        pk__in=members,
+        is_bot=False,
+        is_active=True,
+    ).filter(pk__in=workspace_members)
+
+
+def is_task_owner(user, contract):
+    return task_owners(contract).filter(pk=user.pk).exists()
+
+
 def validate_owner(owner, project):
     if (
         owner.is_bot
@@ -75,8 +94,8 @@ def validate_owner(owner, project):
 
 def require_editor(request, project, contract=None, issue=None):
     require_human(request)
-    owner_id = contract.owner_id if contract else issue.created_by_id
-    if request.user.pk != owner_id and not is_project_admin(request.user, project):
+    owns = is_task_owner(request.user, contract) if contract else request.user.pk == issue.created_by_id
+    if not owns and not is_project_admin(request.user, project):
         raise PermissionDenied("Only the task owner or a project admin can edit its contract.")
 
 
@@ -98,13 +117,34 @@ def emit_event(project, kind, *, actor, issue=None, revision=None, payload=None)
     )
 
 
+@transaction.atomic
+def ensure_task_contract(issue):
+    Issue.objects.select_for_update().get(pk=issue.pk)
+    existing = WorkItemContract.objects.filter(issue=issue).first()
+    if existing:
+        return existing
+    if not issue.created_by_id or issue.created_by.is_bot:
+        return None
+    contract = WorkItemContract(
+        issue=issue,
+        project=issue.project,
+        owner=issue.created_by,
+        created_by=issue.created_by,
+        status=WorkItemContract.Status.DRAFT if issue.is_draft else WorkItemContract.Status.READY,
+    )
+    contract.save(disable_auto_set_user=True)
+    emit_event(issue.project, "task.specification_created", actor=issue.created_by, issue=issue, revision=1)
+    if not issue.is_draft:
+        emit_event(issue.project, "task.ready", actor=issue.created_by, issue=issue, revision=1)
+    return contract
+
+
 class CriterionSerializer(serializers.Serializer):
     id = serializers.UUIDField(required=False)
     description = serializers.CharField()
 
 
 class ContractInputSerializer(serializers.Serializer):
-    owner = serializers.PrimaryKeyRelatedField(queryset=User.objects.all(), required=False)
     release = serializers.PrimaryKeyRelatedField(queryset=ProjectRelease.objects.all(), required=False, allow_null=True)
     requirements = serializers.CharField(required=False, allow_blank=True)
     definition_of_done = CriterionSerializer(many=True, required=False)
@@ -122,8 +162,6 @@ class ContractInputSerializer(serializers.Serializer):
         if unknown:
             raise ValidationError({name: "This field is not a writable contract input." for name in sorted(unknown)})
         project = self.context["project"]
-        if attrs.get("owner"):
-            validate_owner(attrs["owner"], project)
         release = attrs.get("release")
         if release and release.project_id != project.pk:
             raise ValidationError({"release": "Release must belong to this project."})
@@ -131,6 +169,11 @@ class ContractInputSerializer(serializers.Serializer):
 
 
 class ContractSerializer(serializers.ModelSerializer):
+    owner_ids = serializers.SerializerMethodField()
+
+    def get_owner_ids(self, contract):
+        return [str(identifier) for identifier in task_owners(contract).values_list("id", flat=True)]
+
     class Meta:
         model = WorkItemContract
         fields = [
@@ -138,6 +181,7 @@ class ContractSerializer(serializers.ModelSerializer):
             "issue",
             "project",
             "owner",
+            "owner_ids",
             "release",
             "requirements",
             "definition_of_done",
@@ -175,7 +219,7 @@ def locked_contract(project, issue_id):
 
 
 @transaction.atomic
-def edit_contract(request, project, issue_id, data):
+def edit_contract(request, project, issue_id, data, *, material_change=False):
     issue = get_object_or_404(Issue.objects.select_for_update(), pk=issue_id, project=project)
     contract = WorkItemContract.objects.select_for_update().filter(issue=issue).first()
     require_editor(request, project, contract=contract, issue=issue)
@@ -185,20 +229,20 @@ def edit_contract(request, project, issue_id, data):
     expected = values.pop("expected_revision", None)
     created = contract is None
     if created:
-        owner = values.pop("owner", None) or issue.created_by or request.user
+        owner = issue.created_by or request.user
         validate_owner(owner, project)
         contract = WorkItemContract(issue=issue, project=project, owner=owner, **values)
     else:
         check_revision(contract, expected)
         if contract.status in (WorkItemContract.Status.MERGING, WorkItemContract.Status.MERGED):
             raise CoordinationConflict("A merging or completed specification cannot be edited.")
-        changed = any(getattr(contract, name) != value for name, value in values.items())
+        changed = material_change or any(getattr(contract, name) != value for name, value in values.items())
         if not changed:
             return contract, False
         for name, value in values.items():
             setattr(contract, name, value)
         contract.spec_revision += 1
-        contract.status = WorkItemContract.Status.DRAFT
+        contract.status = WorkItemContract.Status.READY
         clear_advance_authorization(contract)
         stale_runs = AgentRun.objects.select_for_update().filter(contract=contract, status="active")
         for run in stale_runs:
@@ -214,27 +258,9 @@ def edit_contract(request, project, issue_id, data):
         issue=issue,
         revision=contract.spec_revision,
     )
-    return contract, created
-
-
-@transaction.atomic
-def submit_contract(request, project, issue_id):
-    contract = locked_contract(project, issue_id)
-    require_editor(request, project, contract=contract)
-    validate_owner(contract.owner, project)
     if contract.status == WorkItemContract.Status.READY:
-        return contract
-    if contract.status not in (WorkItemContract.Status.DRAFT, WorkItemContract.Status.CANCELLED):
-        raise CoordinationConflict("Only a draft or cancelled specification can be submitted.")
-    if not contract.requirements.strip() or not contract.definition_of_done:
-        raise ValidationError("Requirements and definition-of-done criteria are required before submission.")
-    policy = ProjectExecutionPolicy.objects.filter(project=project, enabled=True).first()
-    if not policy or not policy.repositories:
-        raise ValidationError("Enable agent execution and configure project repositories before submission.")
-    contract.status = WorkItemContract.Status.READY
-    contract.save(update_fields=["status", "updated_at"])
-    emit_event(project, "task.ready", actor=request.user, issue=contract.issue, revision=contract.spec_revision)
-    return contract
+        emit_event(project, "task.ready", actor=request.user, issue=issue, revision=contract.spec_revision)
+    return contract, created
 
 
 class AdvanceAuthorizationSerializer(serializers.Serializer):
@@ -246,7 +272,7 @@ class AdvanceAuthorizationSerializer(serializers.Serializer):
 def authorize_advance_merge(request, project, issue_id, data):
     require_human(request)
     contract = locked_contract(project, issue_id)
-    if contract.owner_id != request.user.pk:
+    if not is_task_owner(request.user, contract):
         raise PermissionDenied("Only the task owner can change advance merge authorization.")
     serializer = AdvanceAuthorizationSerializer(data=data)
     serializer.is_valid(raise_exception=True)

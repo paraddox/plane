@@ -28,7 +28,7 @@ from .contracts import (
     emit_event,
     locked_contract,
     require_editor,
-    validate_owner,
+    task_owners,
 )
 
 
@@ -137,7 +137,8 @@ def validate_live_run(run, *, allow_expired_merging=False):
     ):
         raise PermissionDenied("This task is not open for execution.")
     execution_policy(run.project)
-    validate_owner(run.contract.owner, run.project)
+    if not task_owners(run.contract).exists():
+        raise PermissionDenied("This task has no active human owner.")
     require_agent_access(run.agent, run.project, AgentProjectAccess.Role.WORKER)
     parent = run.dispatcher
     if (
@@ -199,6 +200,14 @@ def claim_task(request, project, issue_id, data):
     agent = serializer.validated_data["agent"]
     require_agent_access(agent, project, AgentProjectAccess.Role.WORKER)
     contract = locked_contract(project, issue_id)
+    if (
+        contract.issue.is_draft
+        or contract.issue.archived_at
+        or (contract.issue.state_id and contract.issue.state.group in ("completed", "cancelled", "triage"))
+    ):
+        raise CoordinationConflict("Only an open task can be claimed.")
+    if not task_owners(contract).exists():
+        raise PermissionDenied("This task has no active human owner.")
     existing = AgentRun.objects.select_for_update().filter(contract=contract, status__in=["active", "merging"]).first()
     if existing:
         # A possibly completed remote merge must be reconciled, never reassigned.
@@ -225,6 +234,9 @@ def claim_task(request, project, issue_id, data):
     snapshot = {
         "issue_id": str(contract.issue_id),
         "owner_id": str(contract.owner_id),
+        "owner_ids": [str(identifier) for identifier in task_owners(contract).values_list("id", flat=True)],
+        "name": contract.issue.name,
+        "description_html": contract.issue.description_html,
         "requirements": contract.requirements,
         "definition_of_done": contract.definition_of_done,
         "release_id": str(contract.release_id) if contract.release_id else None,

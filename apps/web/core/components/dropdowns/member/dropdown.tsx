@@ -47,7 +47,7 @@ export const MemberDropdown = observer(function MemberDropdown(props: TMemberDro
     <MemberDropdownBase
       {...props}
       getUserDetails={getUserDetails}
-      memberIds={memberIds ?? []}
+      memberIds={(memberIds ?? []).filter((id) => !getUserDetails(id)?.is_bot)}
       onDropdownOpen={onDropdownOpen}
     />
   );

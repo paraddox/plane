@@ -22,7 +22,9 @@ from plane.db.models import (
     DraftIssueModule,
     ProjectMember,
     EstimatePoint,
+    ProjectRelease,
 )
+from plane.coordination.task_fields import TaskIntentSerializer
 from plane.utils.content_validator import (
     validate_html_content,
     validate_binary_data,
@@ -30,7 +32,10 @@ from plane.utils.content_validator import (
 from plane.app.permissions import ROLE
 
 
-class DraftIssueCreateSerializer(BaseSerializer):
+class DraftIssueCreateSerializer(TaskIntentSerializer, BaseSerializer):
+    release_id = serializers.PrimaryKeyRelatedField(
+        source="release", queryset=ProjectRelease.objects.all(), required=False, allow_null=True
+    )
     # ids
     state_id = serializers.PrimaryKeyRelatedField(
         source="state", queryset=State.objects.all(), required=False, allow_null=True
@@ -53,6 +58,7 @@ class DraftIssueCreateSerializer(BaseSerializer):
         model = DraftIssue
         fields = "__all__"
         read_only_fields = [
+            "release",
             "workspace",
             "created_by",
             "updated_by",
@@ -298,6 +304,7 @@ class DraftIssueCreateSerializer(BaseSerializer):
 
 
 class DraftIssueSerializer(BaseSerializer):
+    release_id = serializers.PrimaryKeyRelatedField(source="release", read_only=True)
     # ids
     cycle_id = serializers.PrimaryKeyRelatedField(read_only=True)
     module_ids = serializers.ListField(child=serializers.UUIDField(), required=False)
@@ -330,6 +337,9 @@ class DraftIssueSerializer(BaseSerializer):
             "updated_by",
             "type_id",
             "description_html",
+            "requirements",
+            "definition_of_done",
+            "release_id",
         ]
         read_only_fields = fields
 

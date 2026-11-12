@@ -5,6 +5,7 @@
  */
 
 import { observer } from "mobx-react";
+import { Package } from "lucide-react";
 // i18n
 import { useTranslation } from "@plane/i18n";
 // ui icons
@@ -32,6 +33,7 @@ import { StateDropdown } from "@/components/dropdowns/state/dropdown";
 import { SidebarPropertyListItem } from "@/components/common/layout/sidebar/property-list-item";
 // helpers
 import { useIssueDetail } from "@/hooks/store/use-issue-detail";
+import { useTaskPermissions } from "@/hooks/store/use-task-permissions";
 import { useMember } from "@/hooks/store/use-member";
 import { useProject } from "@/hooks/store/use-project";
 import { useProjectState } from "@/hooks/store/use-project-state";
@@ -45,6 +47,7 @@ import type { TIssueOperations } from "../issue-detail";
 import { IssueCycleSelect } from "../issue-detail/cycle-select";
 import { IssueLabel } from "../issue-detail/label";
 import { IssueModuleSelect } from "../issue-detail/module-select";
+import { IssueReleaseSelect } from "../issue-detail/release-select";
 
 interface IPeekOverviewProperties {
   workspaceSlug: string;
@@ -56,6 +59,7 @@ interface IPeekOverviewProperties {
 
 export const PeekOverviewProperties = observer(function PeekOverviewProperties(props: IPeekOverviewProperties) {
   const { workspaceSlug, projectId, issueId, issueOperations, disabled } = props;
+  const { canEditIntent } = useTaskPermissions(workspaceSlug, projectId, issueId);
   const { t } = useTranslation();
   // store hooks
   const { getProjectById } = useProject();
@@ -101,7 +105,7 @@ export const PeekOverviewProperties = observer(function PeekOverviewProperties(p
           <MemberDropdown
             value={issue?.assignee_ids ?? undefined}
             onChange={(val) => issueOperations.update(workspaceSlug, projectId, issueId, { assignee_ids: val })}
-            disabled={disabled}
+            disabled={disabled || !canEditIntent}
             projectId={projectId}
             placeholder={t("issue.add.assignee")}
             multiple
@@ -238,6 +242,14 @@ export const PeekOverviewProperties = observer(function PeekOverviewProperties(p
           </SidebarPropertyListItem>
         )}
 
+        <SidebarPropertyListItem icon={Package} label="Release">
+          <IssueReleaseSelect
+            workspaceSlug={workspaceSlug}
+            projectId={projectId}
+            issueId={issueId}
+            disabled={disabled || !!issue.archived_at}
+          />
+        </SidebarPropertyListItem>
         <SidebarPropertyListItem icon={ParentPropertyIcon} label={t("common.parent")}>
           <IssueParentSelectRoot
             className="h-7.5 w-full grow"

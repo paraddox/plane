@@ -20,6 +20,7 @@ import { useIssueDetail } from "@/hooks/store/use-issue-detail";
 import { useMember } from "@/hooks/store/use-member";
 import { useProject } from "@/hooks/store/use-project";
 import { useUser } from "@/hooks/store/user";
+import { useTaskPermissions } from "@/hooks/store/use-task-permissions";
 import useReloadConfirmations from "@/hooks/use-reload-confirmation";
 // plane web components
 import { DeDupeIssuePopoverRoot } from "@/plane-web/components/de-dupe/duplicate-popover";
@@ -33,6 +34,7 @@ import type { TIssueOperations } from "../issue-detail";
 import { IssueParentDetail } from "../issue-detail/parent";
 import { IssueReaction } from "../issue-detail/reactions";
 import { IssueTitleInput } from "../title-input";
+import { IssueTaskCoordination } from "../issue-detail/task-coordination";
 // services init
 const workItemVersionService = new WorkItemVersionService();
 
@@ -53,6 +55,7 @@ export const PeekOverviewIssueDetails = observer(function PeekOverviewIssueDetai
     props;
   // store hooks
   const { data: currentUser } = useUser();
+  const { canEditIntent } = useTaskPermissions(workspaceSlug, props.projectId, issueId);
   const {
     issue: { getIssueById },
   } = useIssueDetail();
@@ -134,7 +137,7 @@ export const PeekOverviewIssueDetails = observer(function PeekOverviewIssueDetai
       <DescriptionInput
         issueSequenceId={issue.sequence_id}
         containerClassName="-ml-3 border-none"
-        disabled={disabled || isArchived}
+        disabled={disabled || isArchived || !canEditIntent}
         editorRef={editorRef}
         entityId={issue.id}
         fileAssetType={EFileAssetType.ISSUE_DESCRIPTION}
@@ -152,6 +155,14 @@ export const PeekOverviewIssueDetails = observer(function PeekOverviewIssueDetai
         workspaceSlug={workspaceSlug}
       />
 
+      <IssueTaskCoordination
+        workspaceSlug={workspaceSlug}
+        projectId={issue.project_id}
+        issueId={issueId}
+        isEditable={!disabled}
+        isArchived={isArchived}
+        section="intent"
+      />
       <div className="flex items-center justify-between gap-2">
         {currentUser && (
           <IssueReaction
@@ -172,17 +183,17 @@ export const PeekOverviewIssueDetails = observer(function PeekOverviewIssueDetai
               isRestoreDisabled: disabled || isArchived,
             }}
             fetchHandlers={{
-              listDescriptionVersions: (issueId) =>
+              listDescriptionVersions: (versionIssueId) =>
                 workItemVersionService.listDescriptionVersions(
                   workspaceSlug,
                   issue.project_id?.toString() ?? "",
-                  issueId
+                  versionIssueId
                 ),
-              retrieveDescriptionVersion: (issueId, versionId) =>
+              retrieveDescriptionVersion: (versionIssueId, versionId) =>
                 workItemVersionService.retrieveDescriptionVersion(
                   workspaceSlug,
                   issue.project_id?.toString() ?? "",
-                  issueId,
+                  versionIssueId,
                   versionId
                 ),
             }}

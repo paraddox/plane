@@ -146,6 +146,9 @@ class WorkspaceDraftIssueViewSet(BaseViewSet):
                     "updated_by",
                     "type_id",
                     "description_html",
+                    "requirements",
+                    "definition_of_done",
+                    "release_id",
                 )
                 .first()
             )
@@ -213,7 +216,12 @@ class WorkspaceDraftIssueViewSet(BaseViewSet):
             )
 
         serializer = IssueCreateSerializer(
-            data=request.data,
+            data={
+                "requirements": draft_issue.requirements,
+                "definition_of_done": draft_issue.definition_of_done,
+                "release_id": str(draft_issue.release_id) if draft_issue.release_id else None,
+                **request.data,
+            },
             context={
                 "project_id": draft_issue.project_id,
                 "workspace_id": draft_issue.project.workspace_id,

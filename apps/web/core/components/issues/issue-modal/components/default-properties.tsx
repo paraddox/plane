@@ -26,6 +26,7 @@ import { PriorityDropdown } from "@/components/dropdowns/priority";
 import { StateDropdown } from "@/components/dropdowns/state/dropdown";
 import { ParentIssuesListModal } from "@/components/issues/parent-issues-list-modal";
 import { IssueLabelSelect } from "@/components/issues/select";
+import { TaskReleaseSelect } from "@/components/coordination/task-release-select";
 // helpers
 // hooks
 import { useProjectEstimates } from "@/hooks/store/estimates";
@@ -87,6 +88,25 @@ export const IssueDefaultProperties = observer(function IssueDefaultProperties(p
 
   return (
     <div className="flex flex-wrap items-center gap-2">
+      {projectId && (
+        <Controller
+          control={control}
+          name="release_id"
+          render={({ field: { value, onChange } }) => (
+            <div className="h-7 min-w-0 rounded border border-strong px-2">
+              <TaskReleaseSelect
+                workspaceSlug={workspaceSlug}
+                projectId={projectId}
+                value={value ?? null}
+                onChange={(release) => {
+                  onChange(release);
+                  handleFormChange();
+                }}
+              />
+            </div>
+          )}
+        />
+      )}
       <Controller
         control={control}
         name="state_id"

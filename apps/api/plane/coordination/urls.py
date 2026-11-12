@@ -16,7 +16,6 @@ def build_patterns(machine=False):
         ("policy/", "ExecutionPolicyEndpoint"),
         ("agents/", "AgentsEndpoint"),
         ("work-items/<uuid:issue_id>/contract/", "ContractEndpoint"),
-        ("work-items/<uuid:issue_id>/submit/", "SubmitEndpoint"),
         ("work-items/<uuid:issue_id>/auto-merge/", "AdvanceMergeEndpoint"),
         ("work-items/<uuid:issue_id>/modules/", "ModuleAssignmentsEndpoint"),
         ("runs/<uuid:run_id>/", "RunEndpoint"),

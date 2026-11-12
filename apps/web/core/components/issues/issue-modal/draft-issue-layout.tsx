@@ -80,6 +80,7 @@ export const DraftIssueLayout = observer(function DraftIssueLayout(props: DraftI
 
     const payload = {
       ...changesMade,
+      definition_of_done: changesMade.definition_of_done?.filter((item) => item.description.trim()),
       name: changesMade?.name && changesMade?.name?.trim() !== "" ? changesMade.name?.trim() : "Untitled",
       project_id: projectId,
     };

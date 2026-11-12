@@ -4,25 +4,14 @@
  * See the LICENSE file for details.
  */
 
-import { useEffect, useState } from "react";
-import {
-  Check,
-  CheckCheck,
-  ExternalLink,
-  GitPullRequest,
-  Plus,
-  RefreshCw,
-  Save,
-  Send,
-  ShieldCheck,
-  Trash2,
-  X,
-} from "lucide-react";
+import { useState } from "react";
+import { Check, ExternalLink, GitPullRequest, RefreshCw, Send, ShieldCheck, X } from "lucide-react";
 import useSWR from "swr";
 import { API_BASE_URL } from "@plane/constants";
 import { Button } from "@plane/propel/button";
-import type { TAcceptanceCriterion, TContractStatus } from "@plane/types";
+import type { TContractStatus } from "@plane/types";
 import { CoordinationService } from "@/services/coordination.service";
+import { useTaskWriteState } from "@/hooks/use-task-write-state";
 import { coordinationError } from "./helpers";
 
 const service = new CoordinationService();
@@ -38,9 +27,8 @@ const statuses: Record<TContractStatus, string> = {
   merged: "Done",
   cancelled: "Cancelled",
 };
-const criterion = (): TAcceptanceCriterion => ({ id: crypto.randomUUID(), description: "" });
 
-type Props = {
+export type TaskCoordinationPanelProps = {
   workspaceSlug: string;
   projectId: string;
   issueId: string;
@@ -51,8 +39,9 @@ type Props = {
   canWrite: boolean;
 };
 
-export function TaskCoordinationPanel(props: Props) {
+export function TaskCoordinationPanel(props: TaskCoordinationPanelProps) {
   const { workspaceSlug, projectId, issueId, actorId, creatorId, members, canAdmin, canWrite } = props;
+  const { pending } = useTaskWriteState(workspaceSlug, projectId, issueId);
   const {
     data,
     error: loadError,
@@ -61,17 +50,8 @@ export function TaskCoordinationPanel(props: Props) {
   } = useSWR(["task-coordination", workspaceSlug, projectId, issueId], () =>
     service.overview(workspaceSlug, projectId, issueId)
   );
-  const { data: releases, error: releasesError } = useSWR(["coordination-releases", workspaceSlug, projectId], () =>
-    service.releases(workspaceSlug, projectId)
-  );
-  const [editing, setEditing] = useState(false);
-  const [dirty, setDirty] = useState(false);
-  const [requirements, setRequirements] = useState("");
-  const [criteria, setCriteria] = useState<TAcceptanceCriterion[]>([]);
-  const [owner, setOwner] = useState(creatorId || actorId);
-  const [release, setRelease] = useState("");
-  const [revision, setRevision] = useState<number | undefined>();
-  const [busy, setBusy] = useState(false);
+  const [acting, setBusy] = useState(false);
+  const busy = acting || pending;
   const [error, setError] = useState("");
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [reviewComment, setReviewComment] = useState("");
@@ -79,7 +59,7 @@ export function TaskCoordinationPanel(props: Props) {
   const [reviewersPending, setReviewersPending] = useState<string[] | null>(null);
   const contract = data?.contract;
   const run = data?.runs[0];
-  const isOwner = actorId === (contract?.owner ?? creatorId);
+  const isOwner = contract?.owner_ids.includes(actorId) ?? actorId === creatorId;
   const frozen = contract?.status === "merging" || contract?.status === "merged";
   const canControl = canWrite && (isOwner || canAdmin);
   const canEdit = canControl && !frozen;
@@ -90,26 +70,6 @@ export function TaskCoordinationPanel(props: Props) {
     !!run.head_sha &&
     (isOwner || data?.reviewers.some((row) => row.reviewer === actorId));
   const memberName = (id: string) => members.find((member) => member.id === id)?.name ?? id;
-  const stale = contract && revision !== undefined && contract.spec_revision !== revision;
-
-  useEffect(() => {
-    if (dirty || !contract) return;
-    setRequirements(contract.requirements);
-    setCriteria(contract.definition_of_done.length ? contract.definition_of_done : [criterion()]);
-    setOwner(contract.owner);
-    setRelease(contract.release ?? "");
-    setRevision(contract.spec_revision);
-  }, [contract, dirty]);
-
-  useEffect(() => {
-    if (!dirty) return;
-    const preventClose = (event: BeforeUnloadEvent) => {
-      event.preventDefault();
-      event.returnValue = "";
-    };
-    window.addEventListener("beforeunload", preventClose);
-    return () => window.removeEventListener("beforeunload", preventClose);
-  }, [dirty]);
 
   async function action(operation: () => Promise<unknown>) {
     setBusy(true);
@@ -124,22 +84,10 @@ export function TaskCoordinationPanel(props: Props) {
     }
   }
 
-  async function save() {
-    await service.saveContract(workspaceSlug, projectId, issueId, {
-      requirements,
-      definition_of_done: criteria.filter((item) => item.description.trim()),
-      owner,
-      release: release || null,
-      expected_revision: revision,
-    });
-    setDirty(false);
-    setEditing(false);
-  }
-
   if (isLoading)
     return (
       <section className="border-y border-subtle py-5 text-body-sm-regular" aria-busy="true">
-        Loading agent workflow...
+        Loading execution...
       </section>
     );
   if (loadError)
@@ -152,28 +100,29 @@ export function TaskCoordinationPanel(props: Props) {
       </section>
     );
 
+  if (data?.inherited_from)
+    return (
+      <section className="border-y border-subtle py-5 text-body-sm-regular" aria-label="Agent workflow">
+        <a
+          className="inline-flex items-center gap-2 text-accent-primary"
+          href={`/${workspaceSlug}/projects/${projectId}/issues/${data.inherited_from}/`}
+        >
+          <ExternalLink className="size-4" /> Parent execution
+        </a>
+      </section>
+    );
+
   return (
     <section className="min-w-0 space-y-5 border-y border-subtle py-5 text-body-sm-regular" aria-label="Agent workflow">
       <header className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           <ShieldCheck className="size-4 shrink-0" />
-          <h2 className="text-body-md-medium">Agent workflow</h2>
+          <h2 className="text-body-md-medium">Execution</h2>
           <span className="text-tertiary">
-            {contract ? `${statuses[contract.status]} / Spec ${contract.spec_revision}` : "Not configured"}
+            {contract ? `${statuses[contract.status]} / Spec ${contract.spec_revision}` : "Ready for agent"}
           </span>
         </div>
         <div className="flex items-center gap-2">
-          {canEdit && !editing && (
-            <Button
-              variant="secondary"
-              onClick={() => {
-                setEditing(true);
-                if (!criteria.length) setCriteria([criterion()]);
-              }}
-            >
-              {contract ? "Edit specification" : "Configure task"}
-            </Button>
-          )}
           <button
             type="button"
             className="grid size-8 shrink-0 place-items-center rounded hover:bg-layer-2"
@@ -186,164 +135,10 @@ export function TaskCoordinationPanel(props: Props) {
           </button>
         </div>
       </header>
-      {(error || releasesError) && (
+      {error && (
         <p role="alert" className="break-words text-danger-primary">
-          {error || coordinationError(releasesError)}
+          {error}
         </p>
-      )}
-      {stale && dirty && (
-        <p role="alert" className="text-danger-primary">
-          A newer specification is available. Your edits have not been saved.
-        </p>
-      )}
-      {editing && canEdit ? (
-        <form
-          className="space-y-4"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void action(save);
-          }}
-        >
-          <fieldset disabled={busy} className="min-w-0 space-y-4">
-            <label className="block space-y-1">
-              <span>Requirements</span>
-              <textarea
-                className={field}
-                rows={4}
-                value={requirements}
-                onChange={(event) => {
-                  setRequirements(event.target.value);
-                  setDirty(true);
-                }}
-              />
-            </label>
-            <div className="space-y-2">
-              <h3 className="text-body-sm-medium">Definition of done</h3>
-              {criteria.map((item, index) => (
-                <div key={item.id} className="flex items-start gap-2">
-                  <textarea
-                    aria-label={`Acceptance criterion ${index + 1}`}
-                    className={field}
-                    rows={2}
-                    value={item.description}
-                    onChange={(event) => {
-                      setCriteria(
-                        criteria.map((row) => (row.id === item.id ? { ...row, description: event.target.value } : row))
-                      );
-                      setDirty(true);
-                    }}
-                  />
-                  <button
-                    type="button"
-                    className="grid size-9 shrink-0 place-items-center rounded hover:bg-layer-2"
-                    title="Remove criterion"
-                    aria-label={`Remove criterion ${index + 1}`}
-                    onClick={() => {
-                      setCriteria(criteria.filter((row) => row.id !== item.id));
-                      setDirty(true);
-                    }}
-                  >
-                    <Trash2 className="size-4" />
-                  </button>
-                </div>
-              ))}
-              <Button
-                type="button"
-                variant="secondary"
-                onClick={() => {
-                  setCriteria([...criteria, criterion()]);
-                  setDirty(true);
-                }}
-              >
-                <Plus className="size-4" />
-                Add criterion
-              </Button>
-            </div>
-            <div className="grid min-w-0 gap-3 sm:grid-cols-2">
-              <label className="block min-w-0 space-y-1">
-                <span>Human owner</span>
-                <select
-                  aria-label="Human owner"
-                  className={field}
-                  value={owner}
-                  onChange={(event) => {
-                    setOwner(event.target.value);
-                    setDirty(true);
-                  }}
-                >
-                  {!members.some((member) => member.id === owner) && <option value={owner}>{memberName(owner)}</option>}
-                  {members.map((member) => (
-                    <option key={member.id} value={member.id}>
-                      {member.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="block min-w-0 space-y-1">
-                <span>Project release</span>
-                <select
-                  aria-label="Project release"
-                  className={field}
-                  value={release}
-                  disabled={!!releasesError}
-                  onChange={(event) => {
-                    setRelease(event.target.value);
-                    setDirty(true);
-                  }}
-                >
-                  <option value="">No release</option>
-                  {releases?.map((row) => (
-                    <option key={row.id} value={row.id}>
-                      {row.identifier} / {row.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <Button type="submit" disabled={!!stale}>
-                <Save className="size-4" />
-                Save specification
-              </Button>
-              <Button
-                type="button"
-                variant="secondary"
-                onClick={() => {
-                  setDirty(false);
-                  setEditing(false);
-                }}
-              >
-                Cancel
-              </Button>
-              {dirty && <span className="text-tertiary">Unsaved changes</span>}
-            </div>
-          </fieldset>
-        </form>
-      ) : (
-        contract && (
-          <div className="space-y-3">
-            <div className="grid gap-2 sm:grid-cols-2">
-              <p className="min-w-0 break-words">
-                <span className="text-tertiary">Owner: </span>
-                {memberName(contract.owner)}
-              </p>
-              <p className="min-w-0 break-words">
-                <span className="text-tertiary">Release: </span>
-                {releases?.find((row) => row.id === contract.release)?.name ?? "None"}
-              </p>
-            </div>
-            <p className="break-words whitespace-pre-wrap">{contract.requirements || "No requirements"}</p>
-            <h3 className="text-body-sm-medium">Definition of done</h3>
-            <ul className="space-y-2">
-              {contract.definition_of_done.map((item) => (
-                <li key={item.id} className="flex gap-2">
-                  <CheckCheck className="mt-0.5 size-4 shrink-0 text-tertiary" />
-                  <span className="min-w-0 break-words whitespace-pre-wrap">{item.description}</span>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )
       )}
       {contract && (
         <>
@@ -352,7 +147,7 @@ export function TaskCoordinationPanel(props: Props) {
               <input
                 type="checkbox"
                 checked={advancePending ?? contract.auto_merge_authorized}
-                disabled={!isOwner || !canWrite || frozen || busy || dirty}
+                disabled={!isOwner || !canWrite || frozen || busy}
                 onChange={(event) => {
                   const enabled = event.target.checked;
                   setAdvancePending(enabled);
@@ -363,15 +158,6 @@ export function TaskCoordinationPanel(props: Props) {
               />
               <span>Authorize automatic merge</span>
             </label>
-            {["draft", "cancelled"].includes(contract.status) && canEdit && (
-              <Button
-                disabled={busy || dirty}
-                onClick={() => void action(() => service.submit(workspaceSlug, projectId, issueId))}
-              >
-                <Send className="size-4" />
-                {contract.status === "cancelled" ? "Resubmit to agents" : "Submit to agents"}
-              </Button>
-            )}
           </div>
           <details className="space-y-3" open={!!data?.reviewers.length || !!canReview}>
             <summary className="cursor-pointer text-body-sm-medium">
@@ -383,7 +169,7 @@ export function TaskCoordinationPanel(props: Props) {
                   <input
                     type="checkbox"
                     checked={(reviewersPending ?? data?.reviewers.map((row) => row.reviewer) ?? []).includes(member.id)}
-                    disabled={!isOwner || !canWrite || frozen || busy || dirty}
+                    disabled={!isOwner || !canWrite || frozen || busy}
                     onChange={(event) => {
                       const selected = data?.reviewers.map((row) => row.reviewer) ?? [];
                       const next = event.target.checked
@@ -482,7 +268,7 @@ export function TaskCoordinationPanel(props: Props) {
                   </label>
                   <div className="flex flex-wrap gap-2">
                     <Button
-                      disabled={busy || dirty}
+                      disabled={busy}
                       onClick={() =>
                         void action(() =>
                           service.decide(workspaceSlug, projectId, issueId, run, "approve", reviewComment)
@@ -494,7 +280,7 @@ export function TaskCoordinationPanel(props: Props) {
                     </Button>
                     <Button
                       variant="secondary"
-                      disabled={busy || dirty || !reviewComment.trim()}
+                      disabled={busy || !reviewComment.trim()}
                       onClick={() =>
                         void action(() =>
                           service.decide(workspaceSlug, projectId, issueId, run, "changes_requested", reviewComment)
@@ -541,7 +327,7 @@ export function TaskCoordinationPanel(props: Props) {
                     question.spec_revision === contract.spec_revision &&
                     canWrite &&
                     !frozen &&
-                    [question.respondent, contract.owner].includes(actorId) && (
+                    (question.respondent === actorId || isOwner) && (
                       <form
                         className="space-y-2"
                         onSubmit={(event) => {

@@ -70,13 +70,17 @@ GitHub configuration; no production deployment is performed by this branch.
 
 ## Human Workflow
 
-Create a normal work item, then configure its **Agent workflow** panel:
+Every work item is agent-first. Requirements and definition of done are native
+fields in task creation, direct detail, and all preview layouts:
 
-- The human owner defaults to the creator, independently of agent assignment.
+- The creator and active human assignees are owners. Agent identity belongs to
+  the execution run, not the human-assignee field.
 - Requirements and stable definition-of-done criteria form a versioned spec.
   Release assignment is project-local. Existing priority and multiple modules
   remain available.
-- Save the complete spec and submit it to agents. Drafts do not dispatch.
+- Open tasks are discoverable immediately, even with empty requirements or
+  acceptance criteria. Agents claim incomplete work to ask blocking questions;
+  incomplete intent cannot pass review-ready or merge. Drafts do not dispatch.
 - The owner may authorize automatic merge in advance for that spec revision.
   Otherwise, the owner or designated reviewers approve the implemented code.
 - Every requested reviewer is a required gate, even with advance authorization
@@ -90,7 +94,7 @@ Create a normal work item, then configure its **Agent workflow** panel:
   execution grants and clears advance permission. Returning to an earlier SHA
   does not reactivate an older code-review decision.
 - A cancellation closes the run and clears advance permission. The owner/admin
-  may explicitly resubmit the unchanged spec. Repeating cancellation of an old
+  may reopen it through the normal task state property. Repeating cancellation of an old
   cancelled run cannot cancel its replacement.
 
 The agent, not an autonomous merge service, submits the final merge command after
@@ -292,9 +296,12 @@ rule is applied.
 Human controls use the same project path under `/api/` instead of `/api/v1/`,
 with normal cookie authentication and CSRF protection:
 
-- `PUT/PATCH work-items/{issue_id}/contract/`: owner/admin spec edits with
-  `expected_revision` for existing specs.
-- `POST work-items/{issue_id}/submit/`: owner/admin readiness or resubmission.
+- Native task `POST /api/workspaces/{slug}/projects/{project_id}/issues/`
+  accepts `requirements`, `definition_of_done` and project-local `release_id`.
+  Native task `PATCH .../issues/{issue_id}/` edits these fields with
+  `expected_revision`. Reads include `spec_revision`. There is no separate
+  configuration or submission endpoint. Intent edits invalidate previous runs
+  and advance approvals; description is included in the execution snapshot.
 - `PUT work-items/{issue_id}/auto-merge/`: owner only, with `enabled` and
   `expected_revision`.
 - `PUT work-items/{issue_id}/reviewers/`: owner only, with `reviewers` UUID list

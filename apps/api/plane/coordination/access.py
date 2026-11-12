@@ -223,6 +223,15 @@ def enforce_coordination_access(request, token, *, locked_execution=None, resolv
             raise PermissionDenied("Execution credentials cannot rewrite actor or ownership metadata.")
         if category == "task" and request.method == "PATCH":
             require_capability(token, "task:update")
+            if set(request.data) & {
+                "requirements",
+                "definition_of_done",
+                "release_id",
+                "assignees",
+                "assignee_ids",
+                "description_html",
+            }:
+                raise PermissionDenied("Execution credentials cannot change product intent or human ownership.")
             if "deleted_at" in request.data:
                 raise PermissionDenied("Execution credentials cannot delete work items.")
             if "parent" in request.data and (
