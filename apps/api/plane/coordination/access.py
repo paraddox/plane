@@ -11,6 +11,7 @@ from rest_framework.permissions import SAFE_METHODS
 
 from plane.db.models import APIToken, AgentRun, FileAsset, Issue, RunChild, RunTarget, WorkItemContract
 from plane.utils.cycle_transfer_issues import transferable_cycle_issues
+from .contracts import CoordinationConflict
 from .execution import lock_execution_credential, locked_run, require_agent_access, validate_live_run
 
 
@@ -97,6 +98,15 @@ def personal_write_targets(request, *, resolved_issue_id=None):
         )
     if view_name in ("ModuleIssueListCreateAPIEndpoint", "CycleIssueListCreateAPIEndpoint"):
         return parsed_ids(request.data.get("issues", []))
+    if view_name == "GenericAssetEndpoint" and kwargs.get("asset_id"):
+        return list(
+            FileAsset.objects.filter(
+                pk=kwargs["asset_id"],
+                workspace__slug=kwargs.get("slug"),
+                is_deleted=False,
+                issue_id__isnull=False,
+            ).values_list("issue_id", flat=True)
+        )
     if view_name == "TransferCycleIssueAPIEndpoint":
         selected = getattr(request, "_coordination_transfer_issue_ids", None)
         if selected is not None:
@@ -259,7 +269,8 @@ def guard_coordination_mutation(view, request):
     if handler is None:
         return
     cycle_transfer = view.__class__.__name__ == "TransferCycleIssueAPIEndpoint"
-    if token.purpose == "personal" and not cycle_transfer and not personal_write_targets(request):
+    generic_asset = view.__class__.__name__ == "GenericAssetEndpoint" and request.method == "PATCH"
+    if token.purpose == "personal" and not cycle_transfer and not generic_asset and not personal_write_targets(request):
         return
 
     @wraps(handler)
@@ -269,16 +280,28 @@ def guard_coordination_mutation(view, request):
                 scope = (request.parser_context or {}).get("kwargs", {})
                 # Contract creation takes the same issue lock. Recheck after
                 # acquiring all targets, in the same order used by bulk writes.
-                targets = list(
-                    Issue.all_objects.select_for_update(of=("self",))
-                    .filter(
-                        pk__in=personal_write_targets(request),
-                        project_id=scope.get("project_id"),
-                        workspace__slug=scope.get("slug"),
-                    )
-                    .order_by("id")
-                    .values_list("id", flat=True)
+                issues = Issue.all_objects.select_for_update(of=("self",)).filter(
+                    pk__in=personal_write_targets(request),
+                    workspace__slug=scope.get("slug"),
                 )
+                if scope.get("project_id"):
+                    issues = issues.filter(project_id=scope["project_id"])
+                targets = list(issues.order_by("id").values_list("id", flat=True))
+                if generic_asset:
+                    # Freeze the binding after issue locks; reject changes rather
+                    # than acquiring an unexpected issue lock out of order.
+                    asset = (
+                        FileAsset.objects.select_for_update(of=("self",))
+                        .filter(
+                            pk=scope["asset_id"],
+                            workspace__slug=scope["slug"],
+                            is_deleted=False,
+                        )
+                        .first()
+                    )
+                    current_targets = [asset.issue_id] if asset and asset.issue_id else []
+                    if set(current_targets) != set(targets):
+                        raise CoordinationConflict("The asset's work item changed. Retry the request.")
                 if cycle_transfer:
                     # Implicit selections must not expand after authorization,
                     # including when the source cycle was initially empty.

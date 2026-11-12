@@ -33,8 +33,9 @@ class CoordinationConflict(APIException):
 
 
 def authorized_project(request, slug, project_id, *, write=False):
-    project = get_object_or_404(Project, pk=project_id, workspace__slug=slug,
-                                workspace__deleted_at__isnull=True, archived_at__isnull=True)
+    project = get_object_or_404(
+        Project, pk=project_id, workspace__slug=slug, workspace__deleted_at__isnull=True, archived_at__isnull=True
+    )
     membership = ProjectMember.objects.filter(project=project, member=request.user, is_active=True)
     if write:
         membership = membership.filter(role__gte=15)
@@ -49,6 +50,13 @@ def authorized_project(request, slug, project_id, *, write=False):
 def require_human(request):
     if not request.user.is_authenticated or request.user.is_bot or isinstance(request.auth, APIToken):
         raise PermissionDenied("This operation requires an authenticated human session.")
+
+
+def is_restricted_guest(user, project):
+    return (
+        not project.guest_view_all_features
+        and ProjectMember.objects.filter(project=project, member=user, is_active=True, role=5).exists()
+    )
 
 
 def is_project_admin(user, project):

@@ -6,7 +6,8 @@
 from django.utils import timezone
 from django.apps import apps
 from django.conf import settings
-from django.db import models
+from django.db import models, transaction
+from django.db.models.deletion import RestrictedError
 from django.db.models.fields.related import OneToOneRel
 
 
@@ -111,6 +112,23 @@ def restore_related_objects(app_label, model_name, instance_pk, using=None):
     pass
 
 
+def _hard_delete_unrestricted(queryset):
+    try:
+        with transaction.atomic():
+            queryset.delete()
+        return
+    except RestrictedError:
+        pass
+
+    # Keep the bulk fast path, isolating retained rows only when necessary.
+    for pk in queryset.values_list("pk", flat=True).iterator():
+        try:
+            with transaction.atomic():
+                queryset.filter(pk=pk).delete()
+        except RestrictedError:
+            continue
+
+
 @shared_task
 def hard_delete():
     from plane.db.models import (
@@ -136,49 +154,71 @@ def hard_delete():
 
     days = settings.HARD_DELETE_AFTER_DAYS
     # check delete workspace
-    _ = Workspace.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)).delete()
+    _hard_delete_unrestricted(
+        Workspace.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days))
+    )
 
     # check delete project
-    _ = Project.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)).delete()
+    _hard_delete_unrestricted(Project.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)))
 
     # check delete cycle
-    _ = Cycle.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)).delete()
+    _hard_delete_unrestricted(Cycle.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)))
 
     # check delete module
-    _ = Module.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)).delete()
+    _hard_delete_unrestricted(Module.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)))
 
     # check delete issue
-    _ = Issue.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)).delete()
+    _hard_delete_unrestricted(Issue.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)))
 
     # check delete page
-    _ = Page.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)).delete()
+    _hard_delete_unrestricted(Page.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)))
 
     # check delete view
-    _ = IssueView.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)).delete()
+    _hard_delete_unrestricted(
+        IssueView.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days))
+    )
 
     # check delete label
-    _ = Label.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)).delete()
+    _hard_delete_unrestricted(Label.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)))
 
     # check delete state
-    _ = State.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)).delete()
+    _hard_delete_unrestricted(State.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)))
 
-    _ = IssueActivity.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)).delete()
+    _hard_delete_unrestricted(
+        IssueActivity.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days))
+    )
 
-    _ = IssueComment.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)).delete()
+    _hard_delete_unrestricted(
+        IssueComment.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days))
+    )
 
-    _ = IssueLink.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)).delete()
+    _hard_delete_unrestricted(
+        IssueLink.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days))
+    )
 
-    _ = IssueReaction.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)).delete()
+    _hard_delete_unrestricted(
+        IssueReaction.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days))
+    )
 
-    _ = UserFavorite.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)).delete()
+    _hard_delete_unrestricted(
+        UserFavorite.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days))
+    )
 
-    _ = ModuleIssue.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)).delete()
+    _hard_delete_unrestricted(
+        ModuleIssue.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days))
+    )
 
-    _ = CycleIssue.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)).delete()
+    _hard_delete_unrestricted(
+        CycleIssue.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days))
+    )
 
-    _ = Estimate.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)).delete()
+    _hard_delete_unrestricted(
+        Estimate.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days))
+    )
 
-    _ = EstimatePoint.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)).delete()
+    _hard_delete_unrestricted(
+        EstimatePoint.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days))
+    )
 
     # at last, check for every thing which ever is left and delete it
     # Get all Django models
@@ -189,6 +229,8 @@ def hard_delete():
         # Check if the model has a 'deleted_at' field
         if hasattr(model, "deleted_at"):
             # Get all instances where 'deleted_at' is greater than 30 days ago
-            _ = model.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)).delete()
+            _hard_delete_unrestricted(
+                model.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days))
+            )
 
     return

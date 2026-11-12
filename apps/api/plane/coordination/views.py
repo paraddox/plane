@@ -28,6 +28,7 @@ from .contracts import (
     authorized_project,
     edit_contract,
     is_project_admin,
+    is_restricted_guest,
     require_human,
     submit_contract,
 )
@@ -59,6 +60,20 @@ class CoordinationEndpoint(BaseAPIView):
 
     def project(self, request, *, write=False, admin=False):
         project = authorized_project(request, self.kwargs["slug"], self.kwargs["project_id"], write=write)
+        issue_id, run_id = self.kwargs.get("issue_id"), self.kwargs.get("run_id")
+        if not write and (issue_id or run_id) and is_restricted_guest(request.user, project):
+            visible = (
+                Issue.objects.filter(project=project, pk=issue_id, created_by=request.user).exists()
+                if issue_id
+                else AgentRun.objects.filter(
+                    project=project,
+                    pk=run_id,
+                    contract__issue__created_by=request.user,
+                    contract__issue__deleted_at__isnull=True,
+                ).exists()
+            )
+            if not visible:
+                raise PermissionDenied("You are not allowed to view this work item.")
         if admin:
             require_human(request)
             if not is_project_admin(request.user, project):

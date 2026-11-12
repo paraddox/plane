@@ -5,10 +5,115 @@
 from uuid import uuid4
 
 import pytest
+from rest_framework.test import APIClient
 
-from plane.db.models import CoordinationEvent, FileAsset, Issue, RunTarget, WorkItemContract
+from plane.db.models import (
+    APIToken,
+    CoordinationEvent,
+    FileAsset,
+    Issue,
+    ProjectMember,
+    RunTarget,
+    User,
+    WorkItemContract,
+    WorkspaceMember,
+)
 from .test_coordination_execution import execution as execution, claim, worker_client
 from .test_coordination_contracts import coordination as coordination
+
+
+@pytest.fixture
+def guest_access(execution):
+    dispatcher, _, project, _, contract, _, _, worker, _, prefix = execution
+    project.guest_view_all_features = False
+    project.save(update_fields=["guest_view_all_features"])
+    guest = User.objects.create(email="guest@coordination.test", username="coordination-guest")
+    WorkspaceMember.objects.create(workspace=project.workspace, member=guest, role=5)
+    membership = ProjectMember.objects.create(project=project, member=guest, role=5)
+    owned = Issue(project=project, name="Guest-created task", created_by=guest)
+    owned.save(disable_auto_set_user=True)
+    WorkItemContract.objects.create(
+        project=project,
+        issue=owned,
+        owner=contract.owner,
+        status="ready",
+        requirements="Guest task requirement",
+        definition_of_done=[{"id": str(uuid4()), "description": "Guest acceptance"}],
+    )
+    hidden_run = claim(execution)
+    owned_run = dispatcher.post(
+        prefix + f"work-items/{owned.pk}/claim/",
+        {"agent": str(worker.pk), "worker_id": "guest-task-worker", "repository": "example/product"},
+        format="json",
+    )
+    assert owned_run.status_code == 201, owned_run.data
+    return guest, membership, owned, owned_run.data["id"], hidden_run
+
+
+def guest_client(guest, transport):
+    client = APIClient()
+    if transport == "session":
+        client.force_login(guest)
+    else:
+        APIToken.objects.create(user=guest, token="guest-coordination-test-key")
+        client.credentials(HTTP_X_API_KEY="guest-coordination-test-key")
+    return client
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("transport", ["session", "key"])
+@pytest.mark.parametrize("endpoint", ["contract", "overview", "run"])
+def test_guest_coordination_reads_preserve_issue_visibility(execution, guest_access, transport, endpoint):
+    _, _, project, hidden, _, _, _, _, _, machine = execution
+    guest, membership, owned, owned_run, hidden_run = guest_access
+    client = guest_client(guest, transport)
+    prefix = machine.replace("/api/v1/", "/api/", 1) if transport == "session" else machine
+    if endpoint == "run":
+        visible_url, hidden_url = prefix + f"runs/{owned_run}/", prefix + f"runs/{hidden_run}/"
+    else:
+        visible_url = prefix + f"work-items/{owned.pk}/{endpoint}/"
+        hidden_url = prefix + f"work-items/{hidden.pk}/{endpoint}/"
+    assert client.get(visible_url).status_code == 200
+    denied = client.get(hidden_url)
+    assert denied.status_code == 403, denied.data
+    project.guest_view_all_features = True
+    project.save(update_fields=["guest_view_all_features"])
+    assert client.get(hidden_url).status_code == 200
+    project.guest_view_all_features = False
+    project.save(update_fields=["guest_view_all_features"])
+    membership.role = 15
+    membership.save(update_fields=["role"])
+    assert client.get(hidden_url).status_code == 200
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("transport", ["session", "key"])
+def test_guest_event_pages_include_only_visible_tasks(execution, guest_access, transport):
+    from django.db import transaction
+    from plane.coordination.contracts import emit_event
+
+    _, _, project, hidden, contract, _, _, _, _, machine = execution
+    guest, _, owned, _, _ = guest_access
+    with transaction.atomic():
+        emit_event(project, "synthetic.visible", actor=guest, issue=owned)
+        emit_event(project, "synthetic.hidden", actor=contract.owner, issue=hidden)
+        emit_event(project, "synthetic.project", actor=contract.owner, payload={"private": "project event"})
+    client = guest_client(guest, transport)
+    prefix = machine.replace("/api/v1/", "/api/", 1) if transport == "session" else machine
+    visible = list(CoordinationEvent.objects.filter(project=project, issue=owned))
+    cursor = 0
+    for index, event in enumerate(visible):
+        response = client.get(prefix + f"events/?after={cursor}&per_page=1")
+        assert response.status_code == 200, response.data
+        assert [str(row["id"]) for row in response.data["events"]] == [str(event.pk)]
+        assert response.data["next_cursor"] == event.sequence > cursor
+        assert response.data["has_more"] == (index < len(visible) - 1)
+        cursor = response.data["next_cursor"]
+    assert client.get(prefix + f"events/?after={cursor}").data["events"] == []
+    project.guest_view_all_features = True
+    project.save(update_fields=["guest_view_all_features"])
+    unrestricted = client.get(prefix + "events/")
+    assert len(unrestricted.data["events"]) == CoordinationEvent.objects.filter(project=project).count()
 
 
 @pytest.mark.django_db

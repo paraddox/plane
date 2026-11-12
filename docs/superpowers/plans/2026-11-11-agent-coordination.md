@@ -170,7 +170,7 @@ creation surfaces, project settings/releases, shared services/types, docs.
 
 ## Final Evidence
 
-- 407 backend API/authentication/security/coordination tests passed with actual
+- 427 backend API/authentication/security/coordination tests passed with actual
   PostgreSQL migrations and Valkey, including the real-HTTP GitHub fixture and
   concurrent claim/credential/revocation checks. Schema validation is included.
 - Main migration 0122 upgraded through 0130 with existing tasks and hashed keys
@@ -314,6 +314,31 @@ API/auth/security suite passed 407 tests with actual PostgreSQL migrations and
 Valkey; scoped Ruff lint/format and diff checks passed. No frontend, model, or
 migration changes were needed. Existing browser/build evidence and live-provider
 validation limits are unchanged.
+
+### Guest Visibility, Generic Assets, and Retention
+
+The next independent read-only review found three issues, all reproduced with
+18 failing database-backed regressions before the fixes:
+
+- Restricted project guests can read only coordination tasks they created and
+  those tasks' runs. Event filtering precedes pagination and omits hidden-task and
+  project-wide events. Session and personal-key reads obey the same restriction;
+  guest-created tasks, full-visibility guests, and regular members remain supported.
+- Generic asset updates resolve the attached task before authorization and
+  recheck after locking the task and asset binding. Workspace-scoped and
+  unrestricted personal keys cannot modify coordinated root/child assets.
+  Ordinary/unbound uploads remain writable. Concurrent rebinding is rejected
+  without changing the upload status or undoing the other transaction's binding.
+- Retention purging retains the normal bulk path, then isolates restricted rows
+  when needed. Required children and canonical question/answer comments remain
+  retained, while unrelated eligible rows in the same model and later cleanup
+  phases are still purged. The configured retention duration is unchanged.
+
+All 18 original regressions and two additional independently committed asset-
+rebinding race cases passed. The complete relevant API/auth/security suite passed
+427 tests with actual PostgreSQL migrations and Valkey. Scoped Ruff lint/format
+and diff checks passed. No frontend, model, or migration changes were needed;
+previous frontend evidence and live-provider validation limits are unchanged.
 
 ## Execution Notes
 

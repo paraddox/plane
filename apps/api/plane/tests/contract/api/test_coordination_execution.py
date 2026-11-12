@@ -242,6 +242,150 @@ def test_attachment_mutations_require_matching_issue_ids(execution, execution_ch
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("target", ["root", "child"])
+@pytest.mark.parametrize("scope", ["unrestricted", "workspace"])
+def test_generic_asset_updates_cannot_bypass_task_credentials(
+    execution, execution_child, api_key_client, api_token, target, scope
+):
+    _, _, project, root, contract, _, _, worker, _, _ = execution
+    _, run_id, child = execution_child
+    if scope == "workspace":
+        api_token.workspace = project.workspace
+        api_token.save(update_fields=["workspace"])
+    protected = FileAsset(
+        project=project,
+        workspace=project.workspace,
+        issue=root if target == "root" else child,
+        agent_run_id=run_id,
+        created_by=worker,
+        is_uploaded=True,
+        asset="synthetic/protected.txt",
+        storage_metadata={"synthetic": True},
+    )
+    protected.save(disable_auto_set_user=True)
+    base = f"/api/v1/workspaces/{project.workspace.slug}/assets/"
+    response = api_key_client.patch(base + f"{protected.pk}/", {"is_uploaded": False}, format="json")
+    assert response.status_code == 403, getattr(response, "data", None)
+    protected.refresh_from_db()
+    assert protected.is_uploaded and protected.created_by_id == worker.pk
+    ordinary = Issue.objects.create(project=project, name="Ordinary attachment owner")
+    for issue in (ordinary, None):
+        allowed = FileAsset.objects.create(
+            project=project,
+            workspace=project.workspace,
+            issue=issue,
+            is_uploaded=True,
+            asset="synthetic/ordinary.txt",
+            storage_metadata={"synthetic": True},
+        )
+        permitted = api_key_client.patch(base + f"{allowed.pk}/", {"is_uploaded": False}, format="json")
+        assert permitted.status_code == 204, getattr(permitted, "data", None)
+        allowed.refresh_from_db()
+        assert not allowed.is_uploaded
+
+
+@pytest.mark.django_db
+def test_generic_asset_update_rechecks_contracts_after_authentication(execution, api_key_client, monkeypatch):
+    from plane.api.middleware.api_authentication import APIKeyAuthentication
+
+    _, _, project, _, contract, _, _, _, _, _ = execution
+    ordinary = Issue.objects.create(project=project, name="Newly coordinated attachment owner")
+    asset = FileAsset.objects.create(
+        project=project,
+        workspace=project.workspace,
+        issue=ordinary,
+        is_uploaded=True,
+        asset="synthetic/newly-coordinated.txt",
+        storage_metadata={"synthetic": True},
+    )
+    record_usage = APIKeyAuthentication.record_usage
+
+    def add_contract(self, token):
+        record_usage(self, token)
+        WorkItemContract.objects.create(project=project, issue=ordinary, owner=contract.owner)
+
+    monkeypatch.setattr(APIKeyAuthentication, "record_usage", add_contract)
+    url = f"/api/v1/workspaces/{project.workspace.slug}/assets/{asset.pk}/"
+    response = api_key_client.patch(url, {"is_uploaded": False}, format="json")
+    assert response.status_code == 403, getattr(response, "data", None)
+    asset.refresh_from_db()
+    assert asset.is_uploaded
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("bound", [False, True])
+def test_generic_asset_update_locks_binding_and_issue(execution, api_key_client, monkeypatch, bound):
+    from plane.api.views.asset import GenericAssetEndpoint
+
+    _, _, project, _, _, _, _, _, _, _ = execution
+    ordinary = Issue.objects.create(project=project, name="Ordinary attachment owner")
+    asset = FileAsset.objects.create(
+        project=project,
+        workspace=project.workspace,
+        issue=ordinary if bound else None,
+        is_uploaded=True,
+        asset="synthetic/locked.txt",
+        storage_metadata={"synthetic": True},
+    )
+    patch = GenericAssetEndpoint.patch
+    inspected = []
+
+    def inspect_locks(self, request, slug, asset_id):
+        targets = [("file_assets", asset.pk)]
+        if bound:
+            targets.append(("issues", ordinary.pk))
+        for table, pk in targets:
+            probe = connection.copy(alias=f"generic-asset-lock-{table}")
+            try:
+                with probe.cursor() as cursor:
+                    cursor.execute(f"SELECT id FROM {table} WHERE id = %s FOR UPDATE NOWAIT", [pk])
+            except OperationalError as error:
+                assert error.__cause__.sqlstate == "55P03"
+                inspected.append(table)
+            finally:
+                probe.close()
+        return patch(self, request, slug, asset_id)
+
+    monkeypatch.setattr(GenericAssetEndpoint, "patch", inspect_locks)
+    url = f"/api/v1/workspaces/{project.workspace.slug}/assets/{asset.pk}/"
+    response = api_key_client.patch(url, {"is_uploaded": False}, format="json")
+    assert response.status_code == 204, getattr(response, "data", None)
+    assert inspected == (["file_assets", "issues"] if bound else ["file_assets"])
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("bound", [False, True])
+def test_generic_asset_update_rejects_a_concurrently_changed_binding(execution, api_key_client, monkeypatch, bound):
+    _, _, project, protected, _, _, _, _, _, _ = execution
+    ordinary = Issue.objects.create(project=project, name="Original attachment owner")
+    asset = FileAsset.objects.create(
+        project=project,
+        workspace=project.workspace,
+        issue=ordinary if bound else None,
+        is_uploaded=True,
+        asset="synthetic/rebound.txt",
+        storage_metadata={"synthetic": True},
+    )
+    select_for_update = FileAsset.objects.select_for_update
+
+    def bind_before_lock(*args, **kwargs):
+        probe = connection.copy(alias="generic-asset-rebinding-probe")
+        try:
+            with probe.cursor() as cursor:
+                cursor.execute("UPDATE file_assets SET issue_id = %s WHERE id = %s", [protected.pk, asset.pk])
+        finally:
+            probe.close()
+        return select_for_update(*args, **kwargs)
+
+    monkeypatch.setattr(FileAsset.objects, "select_for_update", bind_before_lock)
+    url = f"/api/v1/workspaces/{project.workspace.slug}/assets/{asset.pk}/"
+    response = api_key_client.patch(url, {"is_uploaded": False}, format="json")
+    assert response.status_code == 409, getattr(response, "data", None)
+    asset.refresh_from_db()
+    assert asset.issue_id == protected.pk and asset.is_uploaded
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("target", ["root", "child"])
 @pytest.mark.parametrize("action", ["cycle", "relation", "reverse_relation"])
 def test_body_selected_coordinated_targets_are_protected(execution, execution_child, api_key_client, target, action):
     _, _, project, root, contract, _, _, _, _, _ = execution

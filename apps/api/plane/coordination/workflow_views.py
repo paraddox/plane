@@ -9,7 +9,7 @@ from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 
 from plane.db.models import AgentRun, CoordinationEvent, WorkItemContract
-from .contracts import ContractSerializer
+from .contracts import ContractSerializer, is_restricted_guest
 from .execution import RunSerializer
 from .reviews import ReviewDecisionSerializer, ReviewRequirementSerializer
 from .review_views import MergeAttemptSerializer
@@ -63,7 +63,10 @@ class EventsEndpoint(CoordinationEndpoint):
         per_page = self.get_per_page(request)
         if per_page <= 0:
             raise ValidationError({"per_page": "A positive page size is required."})
-        rows = list(CoordinationEvent.objects.filter(project=project, sequence__gt=after)[: per_page + 1])
+        events = CoordinationEvent.objects.filter(project=project, sequence__gt=after)
+        if is_restricted_guest(request.user, project):
+            events = events.filter(issue__created_by=request.user, issue__deleted_at__isnull=True)
+        rows = list(events[: per_page + 1])
         page = rows[:per_page]
         return Response(
             {
