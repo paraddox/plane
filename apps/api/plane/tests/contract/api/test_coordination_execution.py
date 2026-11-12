@@ -23,11 +23,13 @@ from plane.db.models import (
     Issue,
     IssueRelation,
     Module,
+    Project,
     ProjectExecutionPolicy,
     ProjectMember,
     State,
     User,
     WorkItemContract,
+    Workspace,
     WorkspaceMember,
 )
 from .test_coordination_contracts import coordination as coordination
@@ -411,6 +413,58 @@ def test_body_selected_coordinated_targets_are_protected(execution, execution_ch
     payload["issues"] = [str(ordinary.pk)]
     permitted = api_key_client.post(url, payload, format="json")
     assert permitted.status_code == (200 if action == "cycle" else 201), permitted.data
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("relation_type", ["relates_to", "blocking"])
+def test_personal_relations_lock_targets_across_projects(execution, api_key_client, monkeypatch, relation_type):
+    from plane.api.views.issue import IssueRelationListCreateAPIEndpoint
+
+    _, _, project, _, contract, _, _, _, _, _ = execution
+    other = Project.objects.create(workspace=project.workspace, name="Related project", identifier="RELATED")
+    ProjectMember.objects.create(project=other, member=contract.owner, role=20)
+    origin = Issue.objects.create(project=project, name="Relation origin")
+    target = Issue.objects.create(project=other, name="Cross-project target")
+    post = IssueRelationListCreateAPIEndpoint.post
+    locked = []
+
+    def inspect_locks(self, request, slug, project_id, issue_id):
+        for issue in (origin, target):
+            probe = connection.copy(alias="cross-project-relation-probe")
+            try:
+                with probe.cursor() as cursor:
+                    cursor.execute("SELECT id FROM issues WHERE id = %s FOR UPDATE NOWAIT", [issue.pk])
+            except OperationalError as error:
+                assert error.__cause__.sqlstate == "55P03"
+                locked.append(issue.pk)
+            finally:
+                probe.close()
+        return post(self, request, slug, project_id, issue_id)
+
+    monkeypatch.setattr(IssueRelationListCreateAPIEndpoint, "post", inspect_locks)
+    url = f"/api/v1/workspaces/{project.workspace.slug}/projects/{project.pk}/work-items/{origin.pk}/relations/"
+    payload = {"relation_type": relation_type, "issues": [str(target.pk)]}
+    permitted = api_key_client.post(url, payload, format="json")
+    assert permitted.status_code == 201, permitted.data
+    assert locked == [origin.pk, target.pk]
+    WorkItemContract.objects.create(project=other, issue=target, owner=contract.owner)
+    assert api_key_client.post(url, payload, format="json").status_code == 403
+
+
+@pytest.mark.django_db
+def test_personal_relations_reject_targets_outside_the_workspace_without_partial_writes(execution, api_key_client):
+    _, _, project, _, contract, _, _, _, _, _ = execution
+    workspace = Workspace.objects.create(name="Other workspace", slug="other-relation-workspace", owner=contract.owner)
+    other = Project.objects.create(workspace=workspace, name="Other workspace project", identifier="OTHER")
+    origin = Issue.objects.create(project=project, name="Relation origin")
+    ordinary = Issue.objects.create(project=project, name="Ordinary relation target")
+    foreign = Issue.objects.create(project=other, name="Foreign relation target")
+    url = f"/api/v1/workspaces/{project.workspace.slug}/projects/{project.pk}/work-items/{origin.pk}/relations/"
+    response = api_key_client.post(
+        url, {"relation_type": "relates_to", "issues": [str(ordinary.pk), str(foreign.pk)]}, format="json"
+    )
+    assert response.status_code == 400, response.data
+    assert not IssueRelation.objects.exists()
 
 
 @pytest.mark.django_db

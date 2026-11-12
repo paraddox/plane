@@ -270,6 +270,7 @@ def guard_coordination_mutation(view, request):
         return
     cycle_transfer = view.__class__.__name__ == "TransferCycleIssueAPIEndpoint"
     generic_asset = view.__class__.__name__ == "GenericAssetEndpoint" and request.method == "PATCH"
+    relation_write = view.__class__.__name__ == "IssueRelationListCreateAPIEndpoint"
     if token.purpose == "personal" and not cycle_transfer and not generic_asset and not personal_write_targets(request):
         return
 
@@ -280,13 +281,16 @@ def guard_coordination_mutation(view, request):
                 scope = (request.parser_context or {}).get("kwargs", {})
                 # Contract creation takes the same issue lock. Recheck after
                 # acquiring all targets, in the same order used by bulk writes.
+                requested_targets = personal_write_targets(request)
                 issues = Issue.all_objects.select_for_update(of=("self",)).filter(
-                    pk__in=personal_write_targets(request),
+                    pk__in=requested_targets,
                     workspace__slug=scope.get("slug"),
                 )
-                if scope.get("project_id"):
+                if scope.get("project_id") and not relation_write:
                     issues = issues.filter(project_id=scope["project_id"])
                 targets = list(issues.order_by("id").values_list("id", flat=True))
+                if relation_write and set(targets) != set(requested_targets):
+                    raise ValidationError({"issues": "All relation targets must belong to this workspace."})
                 if generic_asset:
                     # Freeze the binding after issue locks; reject changes rather
                     # than acquiring an unexpected issue lock out of order.

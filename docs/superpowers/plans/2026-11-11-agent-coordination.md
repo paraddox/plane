@@ -170,7 +170,7 @@ creation surfaces, project settings/releases, shared services/types, docs.
 
 ## Final Evidence
 
-- 427 backend API/authentication/security/coordination tests passed with actual
+- 431 backend API/authentication/security/coordination tests passed with actual
   PostgreSQL migrations and Valkey, including the real-HTTP GitHub fixture and
   concurrent claim/credential/revocation checks. Schema validation is included.
 - Main migration 0122 upgraded through 0130 with existing tasks and hashed keys
@@ -339,6 +339,26 @@ rebinding race cases passed. The complete relevant API/auth/security suite passe
 427 tests with actual PostgreSQL migrations and Valkey. Scoped Ruff lint/format
 and diff checks passed. No frontend, model, or migration changes were needed;
 previous frontend evidence and live-provider validation limits are unchanged.
+
+### Continued Review: Relation Targets
+
+The next review pass identified a cross-project relation locking gap. Personal
+relation writes now lock every affected work item in the request workspace,
+regardless of project, before rechecking coordination restrictions. Incomplete
+or foreign-workspace target sets are rejected before any relation is inserted.
+Valid same-workspace cross-project relations remain supported.
+
+Three new database-backed cases failed before the fix and passed afterward:
+forward/reverse cross-project locks and mixed-workspace rejection without partial
+writes. A separate archived-child locking claim was disproved: `Issue.objects`
+uses `SoftDeletionManager`, not the archive-filtering `issue_objects` manager.
+The existing state-lock probe now covers archived and unarchived required
+children; both pass without changing merge production code.
+
+The full relevant API/auth/security suite passed 431 tests with real migrations
+and Valkey. Scoped Ruff lint/format and diff checks passed. No frontend, model,
+or migration changes were needed. Further review continues against this updated
+branch until a completed pass finds no actionable issues.
 
 ## Execution Notes
 

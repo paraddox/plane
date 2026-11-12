@@ -474,10 +474,15 @@ def test_required_child_state_is_fenced_until_merge_confirmation(merge_flow, cha
 
 
 @pytest.mark.django_db(transaction=True)
-def test_merge_admission_locks_required_child_state_before_checking_gates(merge_flow, monkeypatch):
+@pytest.mark.parametrize("archived", [False, True])
+def test_merge_admission_locks_required_child_state_before_checking_gates(merge_flow, monkeypatch, archived):
     execution, agent, run_id, provider, _, _, _ = merge_flow
     *_, prefix = execution
     child_state = completed_required_child(merge_flow)
+    if archived:
+        child_id = RunChild.objects.get(run_id=run_id).issue_id
+        Issue.all_objects.filter(pk=child_id).update(archived_at=timezone.localdate())
+        assert Issue.objects.filter(pk=child_id).exists()
     advance(merge_flow)
     target_status = provider.target_status
     inspected, locked = False, False
