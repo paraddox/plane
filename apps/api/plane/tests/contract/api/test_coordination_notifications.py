@@ -325,3 +325,140 @@ def test_browser_module_changes_notify_assigned_worker(execution, callback_netwo
     event = delivery.get().event
     expected = "added" if operation.endswith("add") else "removed"
     assert event.payload[expected] == [str(module.pk)]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("enabled", [True, False])
+def test_merge_authorization_changes_notify_the_assigned_worker(execution, callback_network, enabled):
+    worker, _, _ = handoff(execution)
+    dispatcher, human, _, issue, _, _, _, _, _, prefix = execution
+    main = subscribe(dispatcher, prefix)
+    subscription = subscribe(worker, prefix)
+    response = human.put(
+        prefix.replace("/api/v1/", "/api/") + f"work-items/{issue.pk}/auto-merge/",
+        {"enabled": enabled, "expected_revision": 1},
+        format="json",
+    )
+    assert response.status_code == 200, response.data
+    delivery = AgentEventDelivery.objects.get(
+        subscription_id=subscription.data["id"], event__kind="task.auto_merge_authorization_changed"
+    )
+    assert delivery.event.payload == {"enabled": enabled}
+    assert not AgentEventDelivery.objects.filter(subscription_id=main.data["id"]).exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("entity_type", ["COMMENT_DESCRIPTION", "ISSUE_DESCRIPTION"])
+@pytest.mark.parametrize("uploaded", [True, False])
+def test_binding_editor_upload_notifies_worker_once_it_is_ready(execution, callback_network, entity_type, uploaded):
+    from plane.db.models import IssueComment
+
+    worker, _, _ = handoff(execution)
+    _, human, project, issue, contract, _, _, _, _, prefix = execution
+    target = issue
+    if entity_type == "COMMENT_DESCRIPTION":
+        target = IssueComment.objects.create(
+            project=project, issue=issue, actor=contract.owner, comment_html="<p>Screenshot feedback</p>"
+        )
+    asset = FileAsset.objects.create(
+        project=project, workspace=project.workspace, asset="editor.png", entity_type=entity_type, is_uploaded=uploaded
+    )
+    subscription = subscribe(worker, prefix)
+    url = f"/api/assets/v2/workspaces/{project.workspace.slug}/projects/{project.pk}/{target.pk}/bulk/"
+    for _ in range(2):
+        response = human.post(url, {"asset_ids": [str(asset.pk)]}, format="json")
+        assert response.status_code == 204, getattr(response, "data", None)
+    asset.refresh_from_db()
+    assert (asset.comment_id if entity_type == "COMMENT_DESCRIPTION" else asset.issue_id) == target.pk
+    if not uploaded:
+        assert not AgentEventDelivery.objects.filter(subscription_id=subscription.data["id"]).exists()
+        asset.is_uploaded = True
+        asset.save(update_fields=["is_uploaded"])
+    delivery = AgentEventDelivery.objects.get(
+        subscription_id=subscription.data["id"], event__kind="attachment.uploaded"
+    )
+    assert delivery.event.payload["asset_id"] == str(asset.pk)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("transport", ["browser", "api"])
+def test_deleting_a_module_notifies_its_assigned_worker(execution, callback_network, api_key_client, transport):
+    worker, _, _ = handoff(execution)
+    _, human, project, issue, _, _, _, _, _, prefix = execution
+    module = Module.objects.create(project=project, name="Removed feature")
+    ModuleIssue.objects.create(project=project, issue=issue, module=module)
+    subscription = subscribe(worker, prefix)
+    client = human if transport == "browser" else api_key_client
+    base = "/api/" if transport == "browser" else "/api/v1/"
+    response = client.delete(base + f"workspaces/{project.workspace.slug}/projects/{project.pk}/modules/{module.pk}/")
+    assert response.status_code == 204, getattr(response, "data", None)
+    delivery = AgentEventDelivery.objects.get(
+        subscription_id=subscription.data["id"], event__kind="task.modules_changed"
+    )
+    assert delivery.event.payload == {"added": [], "removed": [str(module.pk)]}
+
+
+@pytest.mark.django_db
+def test_restoring_a_confirmed_attachment_notifies_worker_that_it_is_available_again(execution, callback_network):
+    worker, _, _ = handoff(execution)
+    _, human, project, issue, _, _, _, _, _, prefix = execution
+    subscription = subscribe(worker, prefix)
+    asset = FileAsset.objects.create(
+        project=project,
+        workspace=project.workspace,
+        issue=issue,
+        asset="feedback.png",
+        is_uploaded=True,
+        entity_type="ISSUE_ATTACHMENT",
+    )
+    workspace = f"/api/assets/v2/workspaces/{project.workspace.slug}/"
+    assert (
+        human.delete(workspace + f"projects/{project.pk}/issues/{issue.pk}/attachments/{asset.pk}/").status_code == 204
+    )
+    assert human.post(workspace + f"restore/{asset.pk}/", {}, format="json").status_code == 204
+    events = AgentEventDelivery.objects.filter(subscription_id=subscription.data["id"]).values_list(
+        "event__kind", flat=True
+    )
+    assert list(events) == ["attachment.uploaded", "attachment.deleted", "attachment.uploaded"]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("entity_type", ["COMMENT_DESCRIPTION", "ISSUE_DESCRIPTION"])
+@pytest.mark.parametrize("scope", ["project", "workspace"])
+def test_editor_upload_accepts_an_empty_entity_identifier_before_posting(execution, monkeypatch, entity_type, scope):
+    from plane.app.views.asset import v2
+
+    _, human, project, _, _, _, _, _, _, _ = execution
+    storage = Mock()
+    storage.generate_presigned_post.return_value = {"url": "http://storage.test/upload", "fields": {}}
+    monkeypatch.setattr(v2, "S3Storage", Mock(return_value=storage))
+    url = f"/api/assets/v2/workspaces/{project.workspace.slug}/"
+    if scope == "project":
+        url += f"projects/{project.pk}/"
+    response = human.post(
+        url,
+        {
+            "name": "composed-feedback.png",
+            "type": "image/png",
+            "size": 100,
+            "entity_type": entity_type,
+            "entity_identifier": "",
+        },
+        format="json",
+    )
+    assert response.status_code == 200, response.data
+    asset = FileAsset.objects.get(pk=response.data["asset_id"])
+    assert asset.comment_id is None and asset.issue_id is None
+
+
+@pytest.mark.django_db
+def test_task_asset_binding_changes_preserve_new_project_cover_uploads(execution):
+    _, human, project, _, _, _, _, _, _, _ = execution
+    asset = FileAsset.objects.create(
+        workspace=project.workspace, asset="new-cover.png", entity_type="PROJECT_COVER", is_uploaded=True
+    )
+    url = f"/api/assets/v2/workspaces/{project.workspace.slug}/projects/{project.pk}/{project.pk}/bulk/"
+    response = human.post(url, {"asset_ids": [str(asset.pk)]}, format="json")
+    assert response.status_code == 204, getattr(response, "data", None)
+    project.refresh_from_db()
+    assert project.cover_image_asset_id == asset.pk

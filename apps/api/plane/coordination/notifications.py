@@ -40,6 +40,7 @@ WORKER_EVENT_TYPES = [
     "task.updated",
     "task.specification_changed",
     "task.modules_changed",
+    "task.auto_merge_authorization_changed",
     "task.reviewers_changed",
     "review.decided",
     "review.requested",

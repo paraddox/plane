@@ -109,13 +109,47 @@ try {
   overview = await api(overviewPath);
   assert.ok(overview.questions.find((row) => row.id === question.id).resolved_at);
 
-  const comment = await api(project + `issues/${issue}/comments/`, {
-    method: "POST",
-    status: 201,
-    data: { comment_html: "<p>Additional human feedback for the assigned worker.</p>" },
-  });
+  const inlineImage = await page.screenshot();
+  const commentEditor = page.locator(`#add_comment_${issue} [contenteditable="true"]`);
+  await commentEditor.fill("Additional human feedback with an inline screenshot.");
+  const inlineUploadResponse = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      response.url() === web + `/api/assets/v2/workspaces/${fixture.workspace}/projects/${fixture.project}/`
+  );
+  await commentEditor.evaluate((element, encoded) => {
+    const clipboardData = new DataTransfer();
+    clipboardData.items.add(
+      new File([Uint8Array.from(atob(encoded), (char) => char.charCodeAt(0))], "comment-feedback.png", {
+        type: "image/png",
+      })
+    );
+    element.dispatchEvent(new ClipboardEvent("paste", { clipboardData, bubbles: true, cancelable: true }));
+  }, inlineImage.toString("base64"));
+  const inlineUpload = await (await inlineUploadResponse).json();
+  const commentResponse = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" && response.url() === web + project + `issues/${issue}/comments/`
+  );
+  const bindingResponse = page.waitForResponse(
+    (response) => response.request().method() === "POST" && response.url().endsWith("/bulk/")
+  );
+  await page.getByRole("button", { name: "Comment", exact: true }).click();
+  const comment = await (await commentResponse).json();
+  const binding = await bindingResponse;
+  assert.equal(binding.status(), 204);
+  assert.equal(
+    new URL(binding.url()).pathname,
+    `/api/assets/v2/workspaces/${fixture.workspace}/projects/${fixture.project}/${comment.id}/bulk/`
+  );
   const commentEvent = await eventFor(issue, "comment.created", (data) => data.comment_id === comment.id);
   await receiptFor(issue, commentEvent, mainCalls);
+  const inlineEvent = await eventFor(issue, "attachment.uploaded", (data) => data.asset_id === inlineUpload.asset_id);
+  const inlineStatus = await receiptFor(issue, inlineEvent, mainCalls);
+  const inlineReceipt = inlineStatus.assignments
+    .find((row) => row.issue_id === issue)
+    .receipts.find((row) => row.event_id === inlineEvent);
+  assert.equal(inlineReceipt.asset_sha256, createHash("sha256").update(inlineImage).digest("hex"));
 
   const module = await api(project + "modules/", {
     method: "POST",
@@ -133,6 +167,19 @@ try {
   const moduleRemoved = await eventFor(issue, "task.modules_changed", (data) => data.removed.includes(module.id));
   await receiptFor(issue, moduleRemoved, mainCalls);
 
+  for (const enabled of [true, false]) {
+    await api(coordination + `work-items/${issue}/auto-merge/`, {
+      method: "PUT",
+      data: { enabled, expected_revision: 1 },
+    });
+    const authorization = await eventFor(
+      issue,
+      "task.auto_merge_authorization_changed",
+      (data) => data.enabled === enabled
+    );
+    await receiptFor(issue, authorization, mainCalls);
+  }
+
   const files = [
     { name: "human-feedback.png", mimeType: "image/png", buffer: await page.screenshot() },
     {
@@ -141,7 +188,7 @@ try {
       buffer: Buffer.from("Additional acceptance context for the worker."),
     },
   ];
-  const assets = [];
+  const assets = [inlineUpload.asset_id];
   for (const file of files) {
     const attachments = `/api/assets/v2/workspaces/${fixture.workspace}/projects/${fixture.project}/issues/${issue}/attachments/`;
     const upload = await api(attachments, {
@@ -194,6 +241,8 @@ try {
     answer_acknowledged: true,
     direct_comment_delivery: true,
     direct_module_delivery: true,
+    inline_comment_upload_verified: true,
+    merge_authorization_delivery: true,
     attachment_content_verified: true,
     assignment_preserved: true,
     page_errors: errors,

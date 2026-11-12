@@ -124,6 +124,22 @@ answer-editor changes, the standalone welcome page and unrelated security report
   answers, comments, module changes, uploads and spec refresh passed with main-agent
   calls unchanged at 17 after handoff. No browser or receiver errors.
 
+### Additional Review Cycles
+
+- Fixed missing worker notifications for advance merge authorization, module
+  deletion, late editor-upload binding and attachment restoration.
+- Fixed the comment composer binding images to the task ID instead of the new
+  comment ID, and unbound task-description uploads rejected by the event hook.
+- Preserved project-cover uploads and scoped task-asset binding to the target
+  project or an unbound workspace asset. Added regression coverage for both.
+- Final review found no further actionable issues in the handoff/notification
+  scope. API/model/transport suite: 425 passed, one schema test skipped by settings.
+  Six frontend unit tests, changed-file lint/format checks and diff checks pass.
+- Updated API/web images and verified deployed backend hashes. The browser test
+  posted a real inline screenshot, verified worker-downloaded bytes, and delivered
+  merge authorization changes. Main-agent calls stayed at 21 after handoff, with
+  no page or receiver errors. Earlier UI/demo/report work remains untouched.
+
 ## Local Test Setup
 
 - App: `http://127.0.0.1:18130`

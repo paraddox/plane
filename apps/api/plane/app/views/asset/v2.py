@@ -9,7 +9,9 @@ import uuid
 from django.conf import settings
 from django.http import HttpResponseRedirect
 from django.utils import timezone
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
+from django.db.models import Q
+from django.shortcuts import get_object_or_404
 
 # Third party imports
 from rest_framework import status
@@ -18,7 +20,7 @@ from rest_framework.permissions import AllowAny
 
 # Module imports
 from ..base import BaseAPIView
-from plane.db.models import FileAsset, Workspace, Project, User, WorkspaceMember
+from plane.db.models import FileAsset, Issue, IssueComment, Workspace, Project, User, WorkspaceMember
 from plane.settings.storage import S3Storage
 from plane.app.permissions import allow_permission, ROLE
 from plane.utils.cache import invalidate_cache_directly
@@ -639,6 +641,7 @@ class ProjectBulkAssetEndpoint(BaseAPIView):
         project.save()
 
     @allow_permission([ROLE.ADMIN, ROLE.MEMBER, ROLE.GUEST])
+    @transaction.atomic
     def post(self, request, slug, project_id, entity_id):
         asset_ids = request.data.get("asset_ids", [])
 
@@ -647,7 +650,9 @@ class ProjectBulkAssetEndpoint(BaseAPIView):
             return Response({"error": "No asset ids provided."}, status=status.HTTP_400_BAD_REQUEST)
 
         # get the asset id
-        assets = FileAsset.objects.filter(id__in=asset_ids, workspace__slug=slug)
+        assets = FileAsset.objects.filter(
+            Q(project_id=project_id) | Q(project_id__isnull=True), id__in=asset_ids, workspace__slug=slug
+        )
 
         # Get the first asset
         asset = assets.first()
@@ -664,20 +669,19 @@ class ProjectBulkAssetEndpoint(BaseAPIView):
             [self.save_project_cover(asset, project_id) for asset in assets]
 
         if asset.entity_type == FileAsset.EntityTypeContext.ISSUE_DESCRIPTION:
-            # For some cases, the bulk api is called after the issue is deleted creating
-            # an integrity error
-            try:
-                assets.update(issue_id=entity_id, project_id=project_id)
-            except IntegrityError:
-                pass
+            issue = get_object_or_404(Issue.objects.select_for_update(), pk=entity_id, project_id=project_id)
+            for linked_asset in assets:
+                linked_asset.issue = issue
+                linked_asset.project_id = project_id
+                linked_asset.save(update_fields=["issue", "project"])
 
         if asset.entity_type == FileAsset.EntityTypeContext.COMMENT_DESCRIPTION:
-            # For some cases, the bulk api is called after the comment is deleted
-            # creating an integrity error
-            try:
-                assets.update(comment_id=entity_id)
-            except IntegrityError:
-                pass
+            comment = get_object_or_404(IssueComment, pk=entity_id, project_id=project_id)
+            Issue.objects.select_for_update().get(pk=comment.issue_id)
+            for linked_asset in assets:
+                linked_asset.comment = comment
+                linked_asset.project_id = project_id
+                linked_asset.save(update_fields=["comment", "project"])
 
         if asset.entity_type == FileAsset.EntityTypeContext.PAGE_DESCRIPTION:
             assets.update(page_id=entity_id)

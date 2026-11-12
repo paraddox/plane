@@ -125,6 +125,9 @@ deletion; completed/deleted uploads; native task-field/specification changes;
 module changes; granted-child feedback; review decisions; cancellation and merge.
 Upload notifications occur after confirmation, not when a presigned upload is
 merely issued. The same model/service hooks cover UI and external API writes.
+Advance merge authorization changes also notify the worker. Confirmed editor
+uploads notify when linked to a newly posted task/comment, and restored uploads
+notify when they become available again. Deleting a module notifies its tasks.
 
 Requirement, definition-of-done or description changes invalidate execution keys,
 advance merge authorization and old-revision evidence/approvals, but retain the
