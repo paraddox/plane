@@ -5,7 +5,7 @@
  */
 
 import { useState } from "react";
-import { Check, ExternalLink, GitPullRequest, RefreshCw, Send, ShieldCheck, X } from "lucide-react";
+import { Check, ExternalLink, GitPullRequest, RefreshCw, ShieldCheck, X } from "lucide-react";
 import useSWR from "swr";
 import { API_BASE_URL } from "@plane/constants";
 import { Button } from "@plane/propel/button";
@@ -13,6 +13,7 @@ import type { TContractStatus } from "@plane/types";
 import { CoordinationService } from "@/services/coordination.service";
 import { useTaskWriteState } from "@/hooks/use-task-write-state";
 import { coordinationError } from "./helpers";
+import { QuestionAnswer } from "./question-answer";
 
 const service = new CoordinationService();
 const field =
@@ -51,9 +52,8 @@ export function TaskCoordinationPanel(props: TaskCoordinationPanelProps) {
     service.overview(workspaceSlug, projectId, issueId)
   );
   const [acting, setBusy] = useState(false);
-  const busy = acting || pending;
+  const busy = acting || pending || !!loadError;
   const [error, setError] = useState("");
-  const [answers, setAnswers] = useState<Record<string, string>>({});
   const [reviewComment, setReviewComment] = useState("");
   const [advancePending, setAdvancePending] = useState<boolean | null>(null);
   const [reviewersPending, setReviewersPending] = useState<string[] | null>(null);
@@ -77,8 +77,10 @@ export function TaskCoordinationPanel(props: TaskCoordinationPanelProps) {
     try {
       await operation();
       await mutate();
+      return true;
     } catch (failure) {
       setError(coordinationError(failure));
+      return false;
     } finally {
       setBusy(false);
     }
@@ -90,7 +92,7 @@ export function TaskCoordinationPanel(props: TaskCoordinationPanelProps) {
         Loading execution...
       </section>
     );
-  if (loadError)
+  if (loadError && !data)
     return (
       <section className="border-y border-subtle py-5">
         <p role="alert">{coordinationError(loadError)}</p>
@@ -128,16 +130,16 @@ export function TaskCoordinationPanel(props: TaskCoordinationPanelProps) {
             className="grid size-8 shrink-0 place-items-center rounded hover:bg-layer-2"
             title="Refresh workflow"
             aria-label="Refresh workflow"
-            disabled={busy}
+            disabled={acting || pending}
             onClick={() => void mutate()}
           >
             <RefreshCw className="size-4" />
           </button>
         </div>
       </header>
-      {error && (
+      {(error || loadError) && (
         <p role="alert" className="break-words text-danger-primary">
-          {error}
+          {error || coordinationError(loadError)}
         </p>
       )}
       {contract && (
@@ -322,34 +324,33 @@ export function TaskCoordinationPanel(props: TaskCoordinationPanelProps) {
                           : "Open"}{" "}
                     / Spec {question.spec_revision}
                   </p>
-                  {question.answer && <p className="break-words whitespace-pre-wrap">{question.answer}</p>}
-                  {!question.resolved_at &&
-                    question.spec_revision === contract.spec_revision &&
-                    canWrite &&
-                    !frozen &&
-                    (question.respondent === actorId || isOwner) && (
-                      <form
-                        className="space-y-2"
-                        onSubmit={(event) => {
-                          event.preventDefault();
-                          void action(() =>
-                            service.answer(workspaceSlug, projectId, issueId, question.id, answers[question.id] ?? "")
-                          );
-                        }}
-                      >
-                        <textarea
-                          aria-label={`Answer: ${question.text}`}
-                          className={field}
-                          rows={2}
-                          value={answers[question.id] ?? ""}
-                          onChange={(event) => setAnswers({ ...answers, [question.id]: event.target.value })}
-                        />
-                        <Button type="submit" disabled={busy || !answers[question.id]?.trim()}>
-                          <Send className="size-4" />
-                          Post answer
-                        </Button>
-                      </form>
-                    )}
+                  <QuestionAnswer
+                    question={question.text}
+                    answer={question.answer}
+                    busy={busy}
+                    canAnswer={
+                      !question.resolved_at &&
+                      question.spec_revision === contract.spec_revision &&
+                      canWrite &&
+                      !frozen &&
+                      (question.respondent === actorId || isOwner)
+                    }
+                    onSubmit={(text) =>
+                      action(async () => {
+                        const answered = await service.answer(workspaceSlug, projectId, issueId, question.id, text);
+                        await mutate(
+                          (current) =>
+                            current
+                              ? {
+                                  ...current,
+                                  questions: current.questions.map((row) => (row.id === answered.id ? answered : row)),
+                                }
+                              : current,
+                          { revalidate: false }
+                        );
+                      })
+                    }
+                  />
                 </div>
               ))}
             </div>
