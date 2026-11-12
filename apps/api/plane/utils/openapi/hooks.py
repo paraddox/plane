@@ -59,7 +59,9 @@ def postprocess_api_write_headers(result, generator, request, public):
             continue
 
         action = getattr(callback, "actions", {}).get(method)
-        unsupported = action in getattr(view_class, "idempotency_unsupported_actions", set())
+        unsupported = action in getattr(
+            view_class, "idempotency_unsupported_actions", set()
+        ) or method.upper() in getattr(view_class, "idempotency_unsupported_methods", set())
         if unsupported:
             operation["description"] = (
                 operation.get("description", "")

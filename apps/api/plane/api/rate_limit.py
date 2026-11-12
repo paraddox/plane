@@ -14,6 +14,8 @@ from plane.settings.redis import redis_instance
 
 
 def get_api_key_rate(token):
+    if token.purpose == "execution" and token.delegated_by_id:
+        token = token.delegated_by
     rate = token.allowed_rate_limit
     if not rate:
         rate = "300/minute" if token.is_service else os.environ.get("API_KEY_RATE_LIMIT", "60/minute")
@@ -62,7 +64,8 @@ class ApiKeyRateThrottle(SimpleRateThrottle):
         if token is None:
             return True
         self.num_requests, self.duration = get_api_key_rate(token)
-        self.key = f"{self.scope}:{token.pk}"
+        budget_id = token.delegated_by_id if token.purpose == "execution" else token.pk
+        self.key = f"{self.scope}:{budget_id}"
         try:
             allowed, remaining, reset, wait = redis_instance().eval(
                 API_KEY_RATE_LIMIT_SCRIPT, 1, self.key, self.num_requests, self.duration * 1000, uuid4().hex
@@ -79,6 +82,12 @@ class ApiKeyRateThrottle(SimpleRateThrottle):
 
 
 class APIKeyRateLimitMixin:
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        from plane.coordination.access import guard_coordination_mutation
+
+        guard_coordination_mutation(self, request)
+
     def get_throttles(self):
         return [ApiKeyRateThrottle()]
 

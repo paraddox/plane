@@ -128,7 +128,9 @@ def test_generated_schema_includes_business_methods_and_api_key_auth():
             if parameter.get("in") == "header"
         }
         action = getattr(callback, "actions", {}).get(method.lower())
-        unsupported = action in getattr(callback.cls, "idempotency_unsupported_actions", set())
+        unsupported = action in getattr(
+            callback.cls, "idempotency_unsupported_actions", set()
+        ) or method.upper() in getattr(callback.cls, "idempotency_unsupported_methods", set())
         if unsupported:
             assert "Idempotency-Key" not in headers
             assert "does not support Idempotency-Key" in operation["description"]

@@ -29,6 +29,10 @@ class APITokenSerializer(BaseSerializer):
             "user_type",
             "is_service",
             "allowed_rate_limit",
+            "purpose",
+            "delegated_by",
+            "agent_run",
+            "capabilities",
         ]
 
     def validate(self, attrs):

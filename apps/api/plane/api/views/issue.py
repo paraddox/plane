@@ -158,6 +158,7 @@ from plane.utils.openapi import (
 )
 from plane.bgtasks.work_item_link_task import crawl_work_item_link_title
 from plane.utils.tasks import delay_on_commit as enqueue_work_item_task
+from plane.coordination.access import enforce_coordination_access
 
 
 def work_item_etag(issue):
@@ -698,6 +699,7 @@ class IssueDetailAPIEndpoint(BaseAPIView):
                     external_id=external_id,
                     external_source=external_source,
                 )
+                enforce_coordination_access(request, request.auth, resolved_issue_id=issue.pk)
                 check_work_item_precondition(request.headers.get("If-Match"), issue)
 
                 # Get the current instance of the issue in order to track
@@ -1828,6 +1830,7 @@ class IssueAttachmentListCreateAPIEndpoint(BaseAPIView):
     serializer_class = IssueAttachmentSerializer
     model = FileAsset
     use_read_replica = True
+    idempotency_unsupported_methods = {"POST"}
 
     def check_idempotency_permissions(self, request, slug, project_id, issue_id):
         issue = Issue.objects.get(pk=issue_id, workspace__slug=slug, project_id=project_id)
@@ -1986,6 +1989,7 @@ class IssueAttachmentListCreateAPIEndpoint(BaseAPIView):
 
         # Create a File Asset
         asset = FileAsset.objects.create(
+            agent_run=getattr(request, "coordination_run", None),
             attributes={"name": name, "type": type, "size": size_limit},
             asset=asset_key,
             size=size_limit,
@@ -2095,7 +2099,7 @@ class IssueAttachmentDetailAPIEndpoint(BaseAPIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        issue_attachment = FileAsset.objects.get(pk=pk, workspace__slug=slug, project_id=project_id)
+        issue_attachment = FileAsset.objects.get(pk=pk, workspace__slug=slug, project_id=project_id, issue_id=issue_id)
         issue_attachment.is_deleted = True
         issue_attachment.deleted_at = timezone.now()
         issue_attachment.save()
@@ -2170,7 +2174,7 @@ class IssueAttachmentDetailAPIEndpoint(BaseAPIView):
             )
 
         # Get the asset
-        asset = FileAsset.objects.get(id=pk, workspace__slug=slug, project_id=project_id)
+        asset = FileAsset.objects.get(id=pk, workspace__slug=slug, project_id=project_id, issue_id=issue_id)
 
         # Check if the asset is uploaded
         if not asset.is_uploaded:
@@ -2232,7 +2236,7 @@ class IssueAttachmentDetailAPIEndpoint(BaseAPIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        issue_attachment = FileAsset.objects.get(pk=pk, workspace__slug=slug, project_id=project_id)
+        issue_attachment = FileAsset.objects.get(pk=pk, workspace__slug=slug, project_id=project_id, issue_id=issue_id)
         serializer = IssueAttachmentSerializer(issue_attachment)
 
         # Send this activity only if the attachment is not uploaded before

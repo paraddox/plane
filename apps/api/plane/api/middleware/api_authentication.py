@@ -17,6 +17,7 @@ from rest_framework.permissions import SAFE_METHODS
 from plane.db.models import APIToken, Project
 from plane.db.models.api import hash_api_token
 from plane.api.rate_limit import get_api_key_rate
+from plane.utils.core import set_use_read_replica, should_use_read_replica
 
 
 def filter_api_key_queryset(request, queryset, resource):
@@ -122,7 +123,16 @@ class APIKeyAuthentication(authentication.BaseAuthentication):
         if not token:
             return None
 
-        user, api_token = self.validate_api_token(token)
-        self.enforce_scopes(request, api_token)
-        self.record_usage(api_token)
+        # Revocation and grant checks must not read a lagging replica.
+        replica = should_use_read_replica()
+        set_use_read_replica(False)
+        try:
+            user, api_token = self.validate_api_token(token)
+            self.enforce_scopes(request, api_token)
+            from plane.coordination.access import enforce_coordination_access
+
+            enforce_coordination_access(request, api_token)
+            self.record_usage(api_token)
+        finally:
+            set_use_read_replica(replica)
         return user, api_token

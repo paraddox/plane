@@ -1820,6 +1820,7 @@ export default {
         },
       },
     },
+    coordination: { label: "Agent coordination" },
     automations: {
       label: "Automations",
       heading: "Automations",

@@ -52,6 +52,18 @@ class APIToken(BaseModel):
     expired_at = models.DateTimeField(blank=True, null=True)
     is_service = models.BooleanField(default=False)
     allowed_rate_limit = models.CharField(max_length=255, default="", blank=True)
+    purpose = models.CharField(
+        max_length=20,
+        default="personal",
+        choices=[("personal", "Personal"), ("dispatcher", "Dispatcher"), ("execution", "Execution")],
+    )
+    delegated_by = models.ForeignKey(
+        "self", on_delete=models.SET_NULL, null=True, blank=True, related_name="delegated_keys"
+    )
+    agent_run = models.ForeignKey(
+        "db.AgentRun", on_delete=models.SET_NULL, null=True, blank=True, related_name="credentials"
+    )
+    capabilities = models.JSONField(default=list)
 
     class Meta:
         verbose_name = "API Token"
@@ -69,6 +81,9 @@ class APIToken(BaseModel):
 
 class APIActivityLog(BaseModel):
     token_identifier = models.CharField(max_length=255)
+    agent_run_id = models.UUIDField(null=True, blank=True)
+    delegated_by_id = models.UUIDField(null=True, blank=True)
+    worker_id = models.CharField(max_length=255, null=True, blank=True)
 
     # Request Info
     path = models.CharField(max_length=255)

@@ -52,6 +52,9 @@ class FileAsset(BaseModel):
     draft_issue = models.ForeignKey("db.DraftIssue", on_delete=models.CASCADE, null=True, related_name="assets")
     project = models.ForeignKey("db.Project", on_delete=models.CASCADE, null=True, related_name="assets")
     issue = models.ForeignKey("db.Issue", on_delete=models.CASCADE, null=True, related_name="assets")
+    agent_run = models.ForeignKey(
+        "db.AgentRun", on_delete=models.RESTRICT, null=True, blank=True, related_name="artifacts"
+    )
     comment = models.ForeignKey("db.IssueComment", on_delete=models.CASCADE, null=True, related_name="assets")
     page = models.ForeignKey("db.Page", on_delete=models.CASCADE, null=True, related_name="assets")
     entity_type = models.CharField(max_length=255, null=True, blank=True)

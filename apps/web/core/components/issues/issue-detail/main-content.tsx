@@ -13,12 +13,15 @@ import { EFileAssetType, EIssueServiceType } from "@plane/types";
 import { getTextContent } from "@plane/utils";
 // components
 import { DescriptionVersionsRoot } from "@/components/core/description-versions";
+import { TaskCoordinationPanel } from "@/components/coordination/task-panel";
+import { EUserPermissions, EUserPermissionsLevel } from "@plane/constants";
 import { DescriptionInput } from "@/components/editor/rich-text/description-input";
 // hooks
 import { useIssueDetail } from "@/hooks/store/use-issue-detail";
 import { useMember } from "@/hooks/store/use-member";
 import { useProject } from "@/hooks/store/use-project";
 import { useUser } from "@/hooks/store/user";
+import { useUserPermissions } from "@/hooks/store/user";
 import useReloadConfirmations from "@/hooks/use-reload-confirmation";
 import useSize from "@/hooks/use-window-size";
 // plane web components
@@ -58,6 +61,8 @@ export const IssueMainContent = observer(function IssueMainContent(props: Props)
   const windowSize = useSize();
   const { data: currentUser } = useUser();
   const { getUserDetails } = useMember();
+  const memberStore = useMember();
+  const { allowPermissions } = useUserPermissions();
   const {
     issue: { getIssueById },
     peekIssue,
@@ -174,10 +179,10 @@ export const IssueMainContent = observer(function IssueMainContent(props: Props)
                 isRestoreDisabled: !isEditable || isArchived,
               }}
               fetchHandlers={{
-                listDescriptionVersions: (issueId) =>
-                  workItemVersionService.listDescriptionVersions(workspaceSlug, projectId, issueId),
-                retrieveDescriptionVersion: (issueId, versionId) =>
-                  workItemVersionService.retrieveDescriptionVersion(workspaceSlug, projectId, issueId, versionId),
+                listDescriptionVersions: (workItemId) =>
+                  workItemVersionService.listDescriptionVersions(workspaceSlug, projectId, workItemId),
+                retrieveDescriptionVersion: (workItemId, versionId) =>
+                  workItemVersionService.retrieveDescriptionVersion(workspaceSlug, projectId, workItemId, versionId),
               }}
               handleRestore={(descriptionHTML) => editorRef.current?.setEditorValue(descriptionHTML, true)}
               projectId={projectId}
@@ -195,6 +200,23 @@ export const IssueMainContent = observer(function IssueMainContent(props: Props)
         renderWidgetModals={!isPeekModeActive}
         issueServiceType={EIssueServiceType.ISSUES}
       />
+
+      {currentUser && (
+        <TaskCoordinationPanel
+          key={issueId}
+          workspaceSlug={workspaceSlug}
+          projectId={projectId}
+          issueId={issueId}
+          actorId={currentUser.id}
+          creatorId={issue.created_by ?? currentUser.id}
+          canAdmin={allowPermissions([EUserPermissions.ADMIN], EUserPermissionsLevel.PROJECT, workspaceSlug, projectId)}
+          canWrite={isEditable && !isArchived}
+          members={(memberStore.project.getProjectMemberIds(projectId, false) ?? []).flatMap((id) => {
+            const user = getUserDetails(id);
+            return user && !user.is_bot ? [{ id, name: user.display_name }] : [];
+          })}
+        />
+      )}
 
       {windowSize[0] < 768 && (
         <PeekOverviewProperties
