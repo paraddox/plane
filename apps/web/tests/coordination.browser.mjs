@@ -240,15 +240,7 @@ try {
   assert.equal(overview.contract.status, "review");
   assert.equal(overview.questions[0].resolved_at !== null, true);
   assert.equal(overview.evidence.length, 3);
-  const hydrationWarnings = errors.filter(
-    (message) =>
-      message.startsWith("Hydration failed because") || message.startsWith("There was an error while hydrating.")
-  );
-  // These originate in the unchanged app shell before the coordination route loads.
-  assert.deepEqual(
-    errors.filter((message) => !hydrationWarnings.includes(message)),
-    []
-  );
+  assert.deepEqual(errors, []);
   console.log(
     JSON.stringify({
       result: "passed",
@@ -266,7 +258,6 @@ try {
         "desktop and mobile layouts",
       ],
       output,
-      hydration_warnings: hydrationWarnings.length,
     })
   );
 } catch (error) {
