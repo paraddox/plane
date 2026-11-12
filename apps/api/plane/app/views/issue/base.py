@@ -208,7 +208,7 @@ class IssueViewSet(BaseViewSet):
             workspace__slug=self.kwargs.get("slug"),
         ).distinct()
 
-        return issues
+        return issues.select_related("coordination_contract", "agent_child")
 
     def apply_annotations(self, issues):
         issues = (
@@ -456,6 +456,9 @@ class IssueViewSet(BaseViewSet):
             )
             datetime_fields = ["created_at", "updated_at"]
             issue = user_timezone_converter(issue, datetime_fields, request.user.user_timezone)
+            from plane.coordination.task_fields import TaskFieldsSerializer
+
+            issue.update(TaskFieldsSerializer(serializer.instance).data)
             # Send the model activity
             model_activity.delay(
                 model_name="issue",
@@ -697,7 +700,9 @@ class IssueViewSet(BaseViewSet):
                     issue_id=str(serializer.data.get("id", None)),
                     user_id=request.user.id,
                 )
-            return Response(status=status.HTTP_204_NO_CONTENT)
+            from plane.coordination.task_fields import TaskFieldsSerializer
+
+            return Response({"id": str(serializer.instance.pk), **TaskFieldsSerializer(serializer.instance).data})
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     @allow_permission([ROLE.ADMIN], creator=True, model=Issue)
@@ -731,21 +736,11 @@ class ProjectUserDisplayPropertyEndpoint(BaseAPIView):
     @allow_permission([ROLE.ADMIN, ROLE.MEMBER, ROLE.GUEST])
     def patch(self, request, slug, project_id):
         try:
-            issue_property = ProjectUserProperty.objects.get(
-                user=request.user, 
-                project_id=project_id
-            )
+            issue_property = ProjectUserProperty.objects.get(user=request.user, project_id=project_id)
         except ProjectUserProperty.DoesNotExist:
-            issue_property = ProjectUserProperty.objects.create(
-                user=request.user, 
-                project_id=project_id
-            )
+            issue_property = ProjectUserProperty.objects.create(user=request.user, project_id=project_id)
 
-        serializer = ProjectUserPropertySerializer(
-            issue_property, 
-            data=request.data,
-            partial=True
-        )
+        serializer = ProjectUserPropertySerializer(issue_property, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         serializer.save()
         return Response(serializer.data, status=status.HTTP_200_OK)

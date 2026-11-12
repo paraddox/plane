@@ -14,7 +14,7 @@ from plane.settings.redis import redis_instance
 
 
 def get_api_key_rate(token):
-    if token.purpose == "execution" and token.delegated_by_id:
+    if token.purpose in ("execution", "assignment") and token.delegated_by_id:
         token = token.delegated_by
     rate = token.allowed_rate_limit
     if not rate:
@@ -64,7 +64,7 @@ class ApiKeyRateThrottle(SimpleRateThrottle):
         if token is None:
             return True
         self.num_requests, self.duration = get_api_key_rate(token)
-        budget_id = token.delegated_by_id if token.purpose == "execution" else token.pk
+        budget_id = token.delegated_by_id if token.purpose in ("execution", "assignment") else token.pk
         self.key = f"{self.scope}:{budget_id}"
         try:
             allowed, remaining, reset, wait = redis_instance().eval(

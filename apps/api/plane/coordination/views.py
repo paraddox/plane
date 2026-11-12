@@ -22,15 +22,12 @@ from plane.db.models import AgentRun
 
 from .contracts import (
     AdvanceAuthorizationSerializer,
-    ContractInputSerializer,
     ContractSerializer,
     authorize_advance_merge,
     authorized_project,
-    edit_contract,
     is_project_admin,
     is_restricted_guest,
     require_human,
-    submit_contract,
 )
 from .modules import ModuleAssignmentSerializer, assign_modules
 from .execution import (
@@ -41,6 +38,9 @@ from .execution import (
     issue_execution_credential,
     renew_execution,
     require_dispatcher,
+    handoff_execution,
+    refresh_execution,
+    RefreshSerializer,
 )
 
 
@@ -84,6 +84,7 @@ class CoordinationEndpoint(BaseAPIView):
 class ContractEndpoint(CoordinationEndpoint):
     serializer_class = ContractSerializer
     coordination_action = "contract"
+    http_method_names = ["get", "head", "options"]
 
     @extend_schema(tags=["Agent Coordination"], responses=ContractSerializer)
     def get(self, request, slug, project_id, issue_id):
@@ -91,26 +92,6 @@ class ContractEndpoint(CoordinationEndpoint):
         contract = get_object_or_404(
             WorkItemContract, issue_id=issue_id, project=project, issue__deleted_at__isnull=True
         )
-        return Response(ContractSerializer(contract).data)
-
-    @extend_schema(tags=["Agent Coordination"], request=ContractInputSerializer, responses=ContractSerializer)
-    def put(self, request, slug, project_id, issue_id):
-        project = self.project(request, write=True)
-        contract, created = edit_contract(request, project, issue_id, request.data)
-        return Response(ContractSerializer(contract).data, status=201 if created else 200)
-
-    @extend_schema(tags=["Agent Coordination"], request=ContractInputSerializer, responses=ContractSerializer)
-    def patch(self, request, slug, project_id, issue_id):
-        return self.put(request, slug, project_id, issue_id)
-
-
-class SubmitEndpoint(CoordinationEndpoint):
-    serializer_class = ContractSerializer
-
-    @extend_schema(tags=["Agent Coordination"], request=None, responses=ContractSerializer)
-    def post(self, request, slug, project_id, issue_id):
-        project = self.project(request, write=True)
-        contract = submit_contract(request, project, issue_id)
         return Response(ContractSerializer(contract).data)
 
 
@@ -239,10 +220,6 @@ class MachineContractEndpoint(MachineCoordinationMixin, ContractEndpoint):
     pass
 
 
-class MachineSubmitEndpoint(MachineCoordinationMixin, SubmitEndpoint):
-    pass
-
-
 class MachineAdvanceMergeEndpoint(MachineCoordinationMixin, AdvanceMergeEndpoint):
     pass
 
@@ -334,6 +311,56 @@ class CredentialEndpoint(MachineCoordinationMixin, CoordinationEndpoint):
         return response
 
 
+class HandoffResponseSerializer(serializers.Serializer):
+    id = serializers.UUIDField()
+    token = serializers.CharField()
+    run = RunSerializer()
+    event_cursor = serializers.IntegerField()
+
+
+class HandoffEndpoint(MachineCoordinationMixin, CoordinationEndpoint):
+    serializer_class = HandoffResponseSerializer
+    coordination_action = "handoff"
+    idempotency_unsupported_methods = {"POST"}
+
+    @extend_schema(tags=["Agent Execution"], request=None, responses={201: HandoffResponseSerializer})
+    def post(self, request, slug, project_id, run_id):
+        project = self.project(request, write=True)
+        run, credential, raw, cursor = handoff_execution(request, project, run_id)
+        response = Response(
+            {
+                "id": str(credential.pk),
+                "token": raw,
+                "run": RunSerializer(run).data,
+                "event_cursor": cursor,
+            },
+            status=201,
+        )
+        response["Cache-Control"] = "no-store"
+        return response
+
+
+class RefreshEndpoint(MachineCoordinationMixin, CoordinationEndpoint):
+    serializer_class = RefreshSerializer
+    coordination_action = "refresh"
+    idempotency_unsupported_methods = {"POST"}
+
+    @extend_schema(tags=["Agent Execution"], request=RefreshSerializer, responses={201: CredentialResponseSerializer})
+    def post(self, request, slug, project_id, run_id):
+        project = self.project(request, write=True)
+        credential, raw = refresh_execution(request, project, run_id)
+        response = Response(
+            {
+                "id": str(credential.pk),
+                "token": raw,
+                "expired_at": credential.expired_at,
+            },
+            status=201,
+        )
+        response["Cache-Control"] = "no-store"
+        return response
+
+
 class RunEndpoint(CoordinationEndpoint):
     serializer_class = RunSerializer
     coordination_action = "run"
@@ -395,12 +422,15 @@ class CandidatesEndpoint(MachineCoordinationMixin, CoordinationEndpoint):
         return self.paginate(
             request=request,
             queryset=WorkItemContract.objects.filter(project=project)
+            .filter(issue__is_draft=False, issue__archived_at__isnull=True, issue__agent_child__isnull=True)
+            .exclude(issue__state__group__in=["completed", "cancelled", "triage"])
             .filter(
                 Q(status="ready")
                 | Q(
                     status__in=["in_progress", "awaiting_input", "review"],
                     runs__status="active",
                     runs__deleted_at__isnull=True,
+                    runs__handed_off_at__isnull=True,
                     runs__lease_expires_at__lte=timezone.now(),
                 )
             )

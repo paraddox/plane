@@ -14,8 +14,10 @@ from .contracts import (
     check_revision,
     emit_event,
     locked_contract,
+    is_task_owner,
     require_human,
     validate_owner,
+    task_owners,
 )
 from .workflow import worker_run
 
@@ -54,7 +56,7 @@ class ReviewDecisionSerializer(serializers.ModelSerializer):
 def request_reviewers(request, project, issue_id, data):
     require_human(request)
     contract = locked_contract(project, issue_id)
-    if request.user.pk != contract.owner_id:
+    if not is_task_owner(request.user, contract):
         raise PermissionDenied("Only the owner may change required reviewers.")
     serializer = ReviewersInputSerializer(data=data)
     serializer.is_valid(raise_exception=True)
@@ -114,7 +116,7 @@ def decide_review(request, project, issue_id, data):
     if not run.head_sha or not run.pull_request:
         raise ValidationError("The agent must report a pull request and code revision first.")
     required = ReviewRequirement.objects.filter(contract=contract, reviewer=request.user, is_active=True).exists()
-    if request.user.pk != contract.owner_id and not required:
+    if not is_task_owner(request.user, contract) and not required:
         raise PermissionDenied("Only the task owner or a designated reviewer can decide this review.")
     decision = ReviewDecision.objects.create(
         project=project,
@@ -145,6 +147,8 @@ def decide_review(request, project, issue_id, data):
 @transaction.atomic
 def mark_review_ready(request, project, run_id):
     run = worker_run(request, project, run_id=run_id)
+    if not run.contract.requirements.strip() or not run.contract.definition_of_done:
+        raise CoordinationConflict("Clarify the requirements and definition of done before requesting review.")
     if not run.head_sha or not run.pull_request:
         raise ValidationError("Report the pull request and code revision first.")
     if run.contract.questions.filter(spec_revision=run.spec_revision, blocking=True, resolved_at__isnull=True).exists():
@@ -164,6 +168,8 @@ def mark_review_ready(request, project, run_id):
 
 def merge_authorization(run):
     contract = run.contract
+    if not contract.requirements.strip() or not contract.definition_of_done:
+        raise CoordinationConflict("Complete the requirements and definition of done before merging.")
     decisions = ReviewDecision.objects.filter(
         run=run,
         spec_revision=run.spec_revision,
@@ -174,9 +180,11 @@ def merge_authorization(run):
     latest = {}
     for decision in decisions:
         latest.setdefault(decision.reviewer_id, decision)
-    owner_decision = latest.get(contract.owner_id)
-    if owner_decision and owner_decision.decision == "changes_requested":
+    owner_ids = set(task_owners(contract).values_list("id", flat=True))
+    owner_decisions = [decision for user_id, decision in latest.items() if user_id in owner_ids]
+    if any(decision.decision == "changes_requested" for decision in owner_decisions):
         raise CoordinationConflict("The owner has requested changes on this code revision.")
+    owner_decision = next((decision for decision in owner_decisions if decision.decision == "approve"), None)
     required = list(contract.review_requirements.filter(is_active=True).select_related("reviewer"))
     decision_ids = []
     for requirement in required:
@@ -188,7 +196,7 @@ def merge_authorization(run):
     advance = (
         contract.auto_merge_authorized
         and contract.auto_merge_revision == contract.spec_revision
-        and contract.auto_merge_authorized_by_id == contract.owner_id
+        and contract.auto_merge_authorized_by_id in owner_ids
     )
     owner_approved = owner_decision and owner_decision.decision == "approve"
     if not advance and not owner_approved and not required:

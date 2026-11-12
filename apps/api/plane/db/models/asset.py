@@ -8,7 +8,7 @@ from uuid import uuid4
 # Django import
 from django.conf import settings
 from django.core.exceptions import ValidationError
-from django.db import models
+from django.db import models, transaction
 
 # Module import
 from plane.utils.path_validator import sanitize_filename
@@ -78,6 +78,45 @@ class FileAsset(BaseModel):
             models.Index(fields=["entity_type", "entity_identifier"], name="asset_entity_idx"),
             models.Index(fields=["asset"], name="asset_asset_idx"),
         ]
+
+    def save(self, *args, **kwargs):
+        from .issue import Issue, IssueComment
+
+        issue_id = self.issue_id or None
+        if issue_id is None and self.comment_id:
+            issue_id = IssueComment.all_objects.filter(pk=self.comment_id).values_list("issue_id", flat=True).first()
+        if issue_id is None:
+            return super().save(*args, **kwargs)
+        with transaction.atomic():
+            Issue.all_objects.select_for_update().get(pk=issue_id)
+            previous = (
+                FileAsset.all_objects.filter(pk=self.pk)
+                .values("is_uploaded", "is_deleted", "deleted_at", "issue_id", "comment_id")
+                .first()
+            )
+            super().save(*args, **kwargs)
+            kind = None
+            if self.is_deleted or self.deleted_at:
+                if previous and not previous["is_deleted"] and not previous["deleted_at"]:
+                    kind = "attachment.deleted"
+            elif self.is_uploaded and (
+                previous is None
+                or not previous["is_uploaded"]
+                or previous["is_deleted"]
+                or previous["deleted_at"] is not None
+                or previous["issue_id"] != self.issue_id
+                or previous["comment_id"] != self.comment_id
+            ):
+                kind = "attachment.uploaded"
+            if kind:
+                from plane.coordination.changes import emit_task_change
+
+                emit_task_change(
+                    issue_id,
+                    kind,
+                    actor=self.updated_by or self.created_by,
+                    payload={"asset_id": str(self.pk), "comment_id": str(self.comment_id) if self.comment_id else None},
+                )
 
     def __str__(self):
         return str(self.asset)

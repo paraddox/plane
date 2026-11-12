@@ -229,7 +229,7 @@ def update_work_item(request, slug, project_id, pk, data, if_match=None):
         slug=slug,
         origin=base_host(request=request, is_app=True),
     )
-    return Response(serializer.data, status=status.HTTP_200_OK, headers={"ETag": work_item_etag(issue)})
+    return Response(serializer.data, status=status.HTTP_200_OK, headers={"ETag": work_item_etag(serializer.instance)})
 
 
 def user_has_issue_permission(user_id, project_id, issue=None, allowed_roles=None, allow_creator=True):
@@ -277,6 +277,7 @@ class WorkspaceIssueAPIEndpoint(BaseAPIView):
             .select_related("workspace")
             .select_related("state")
             .select_related("parent")
+            .select_related("coordination_contract", "agent_child")
             .prefetch_related("assignees")
             .prefetch_related("labels")
             .order_by(self.kwargs.get("order_by", "-created_at"))
@@ -349,6 +350,7 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
             .select_related("workspace")
             .select_related("state")
             .select_related("parent")
+            .select_related("coordination_contract", "agent_child")
             .prefetch_related("assignees")
             .prefetch_related("labels")
             .order_by(self.kwargs.get("order_by", "-created_at"))
@@ -606,6 +608,7 @@ class IssueDetailAPIEndpoint(BaseAPIView):
             .select_related("workspace")
             .select_related("state")
             .select_related("parent")
+            .select_related("coordination_contract", "agent_child")
             .prefetch_related("assignees")
             .prefetch_related("labels")
             .order_by(self.kwargs.get("order_by", "-created_at"))
@@ -743,7 +746,11 @@ class IssueDetailAPIEndpoint(BaseAPIView):
                         slug=slug,
                         origin=base_host(request=request, is_app=True),
                     )
-                    return Response(serializer.data, status=status.HTTP_200_OK, headers={"ETag": work_item_etag(issue)})
+                    return Response(
+                        serializer.data,
+                        status=status.HTTP_200_OK,
+                        headers={"ETag": work_item_etag(serializer.instance)},
+                    )
                 return Response(
                     # If the serializer is not valid, respond with 400 bad
                     # request

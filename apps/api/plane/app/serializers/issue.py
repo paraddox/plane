@@ -10,6 +10,7 @@ from django.db import IntegrityError
 
 # Third Party imports
 from rest_framework import serializers
+from plane.coordination.task_fields import TaskFieldsSerializer
 
 # Module imports
 from .base import BaseSerializer, DynamicBaseSerializer
@@ -79,7 +80,7 @@ class IssueProjectLiteSerializer(BaseSerializer):
 
 ##TODO: Find a better way to write this serializer
 ## Find a better approach to save manytomany?
-class IssueCreateSerializer(BaseSerializer):
+class IssueCreateSerializer(TaskFieldsSerializer, BaseSerializer):
     # ids
     state_id = serializers.PrimaryKeyRelatedField(
         source="state", queryset=State.all_state_objects.all(), required=False, allow_null=True
@@ -757,7 +758,7 @@ class IssueIntakeSerializer(DynamicBaseSerializer):
         read_only_fields = fields
 
 
-class IssueSerializer(DynamicBaseSerializer):
+class IssueSerializer(TaskFieldsSerializer, DynamicBaseSerializer):
     # ids
     cycle_id = serializers.PrimaryKeyRelatedField(read_only=True)
     module_ids = serializers.ListField(child=serializers.UUIDField(), required=False)
@@ -799,6 +800,11 @@ class IssueSerializer(DynamicBaseSerializer):
             "link_count",
             "is_draft",
             "archived_at",
+            "requirements",
+            "definition_of_done",
+            "release_id",
+            "spec_revision",
+            "expected_revision",
         ]
         read_only_fields = fields
 

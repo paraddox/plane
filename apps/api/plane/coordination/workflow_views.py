@@ -8,7 +8,7 @@ from rest_framework import serializers
 from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 
-from plane.db.models import AgentRun, CoordinationEvent, WorkItemContract
+from plane.db.models import AgentRun, CoordinationEvent, RunChild, WorkItemContract
 from .contracts import ContractSerializer, is_restricted_guest
 from .execution import RunSerializer
 from .reviews import ReviewDecisionSerializer, ReviewRequirementSerializer
@@ -82,6 +82,7 @@ class MachineEventsEndpoint(MachineCoordinationMixin, EventsEndpoint):
 
 
 class OverviewSerializer(serializers.Serializer):
+    inherited_from = serializers.UUIDField(allow_null=True)
     contract = ContractSerializer()
     runs = RunSerializer(many=True)
     questions = QuestionSerializer(many=True)
@@ -99,12 +100,44 @@ class OverviewEndpoint(CoordinationEndpoint):
     @extend_schema(tags=["Agent Coordination"], responses=OverviewSerializer)
     def get(self, request, slug, project_id, issue_id):
         project = self.project(request)
-        contract = get_object_or_404(
-            WorkItemContract, project=project, issue_id=issue_id, issue__deleted_at__isnull=True
+        contract = (
+            WorkItemContract.objects.select_related("issue", "project__workspace")
+            .filter(project=project, issue_id=issue_id, issue__deleted_at__isnull=True)
+            .first()
         )
+        if contract is None:
+            child = get_object_or_404(
+                RunChild.objects.select_related("contract__issue", "contract__project__workspace"),
+                project=project,
+                issue_id=issue_id,
+                issue__deleted_at__isnull=True,
+                contract__issue__deleted_at__isnull=True,
+            )
+            specification = dict(ContractSerializer(child.contract).data)
+            specification.update(
+                issue=child.issue_id,
+                requirements=child.requirements,
+                definition_of_done=child.definition_of_done,
+                release=child.release_id,
+                spec_revision=child.spec_revision,
+            )
+            return Response(
+                {
+                    "inherited_from": str(child.contract.issue_id),
+                    "contract": specification,
+                    "runs": [],
+                    "questions": [],
+                    "children": [],
+                    "reviewers": [],
+                    "decisions": [],
+                    "merges": [],
+                    "evidence": [],
+                }
+            )
         runs = AgentRun.objects.filter(contract=contract)
         return Response(
             {
+                "inherited_from": None,
                 "contract": ContractSerializer(contract).data,
                 "runs": RunSerializer(runs, many=True).data,
                 "questions": QuestionSerializer(contract.questions.select_related("answer_comment"), many=True).data,

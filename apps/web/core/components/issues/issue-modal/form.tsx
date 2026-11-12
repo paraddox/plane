@@ -49,6 +49,7 @@ import { DuplicateModalRoot } from "@/plane-web/components/de-dupe/duplicate-mod
 import { IssueTypeSelect, WorkItemTemplateSelect } from "@/plane-web/components/issues/issue-modal";
 import { WorkItemModalAdditionalProperties } from "@/plane-web/components/issues/issue-modal/modal-additional-properties";
 import { useDebouncedDuplicateIssues } from "@/plane-web/hooks/use-debounced-duplicate-issues";
+import { TaskIntentFields } from "@/components/coordination/task-intent-fields";
 
 export interface IssueFormProps {
   data?: Partial<TIssue>;
@@ -187,7 +188,7 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
   // Reset form when data prop changes
   useEffect(() => {
     if (data) {
-      reset({ ...DEFAULT_WORK_ITEM_FORM_VALUES, project_id: projectId, ...data });
+      reset({ ...DEFAULT_WORK_ITEM_FORM_VALUES, project_id: projectId, ...data }, { keepDirtyValues: true });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [...dataResetProperties]);
@@ -218,6 +219,9 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
   }, [workItemTemplateId]);
 
   const handleFormSubmit = async (formData: Partial<TIssue>, is_draft_issue = false) => {
+    if (formData.definition_of_done) {
+      formData.definition_of_done = formData.definition_of_done.filter((item) => item.description.trim());
+    }
     // Check if the editor is ready to discard
     if (!editorRef.current?.isEditorReadyToDiscard()) {
       setToast({
@@ -244,6 +248,7 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
           ...getChangedIssuefields(formData, dirtyFields as { [key: string]: boolean | undefined }),
           project_id: getValues<"project_id">("project_id"),
           id: data.id,
+          expected_revision: data.spec_revision,
           description_html: formData.description_html ?? "<p></p>",
           type_id: getValues<"type_id">("type_id"),
         };
@@ -270,6 +275,7 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
           });
           editorRef?.current?.clearEditor();
         }
+        return undefined;
       })
       .catch((error) => {
         console.error(error);
@@ -334,15 +340,15 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
     const issue = getIssueById(parentId);
     if (!issue) return;
 
-    const projectDetails = getProjectById(issue.project_id);
-    if (!projectDetails) return;
+    const parentProjectDetails = getProjectById(issue.project_id);
+    if (!parentProjectDetails) return;
 
     const stateDetails = getStateById(issue.state_id);
 
     setSelectedParentIssue(
-      convertWorkItemDataToSearchResponse(workspaceSlug?.toString(), issue, projectDetails, stateDetails)
+      convertWorkItemDataToSearchResponse(workspaceSlug?.toString(), issue, parentProjectDetails, stateDetails)
     );
-  }, [watch, getIssueById, getProjectById, selectedParentIssue, getStateById]);
+  }, [watch, getIssueById, getProjectById, selectedParentIssue, getStateById, workspaceSlug, setSelectedParentIssue]);
 
   // executing this useEffect when isDirty changes
   useEffect(() => {
@@ -380,7 +386,7 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
         <div className="w-full rounded-lg">
           <form
             ref={formRef}
-            onSubmit={handleSubmit((data) => handleFormSubmit(data))}
+            onSubmit={handleSubmit((formValues) => handleFormSubmit(formValues))}
             className="flex w-full flex-col"
           >
             <div className="rounded-t-lg bg-surface-1 p-5">
@@ -479,6 +485,20 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
                   onClose={onClose}
                 />
               </div>
+              <div className="px-5">
+                <TaskIntentFields
+                  disabled={isDisabled}
+                  value={{
+                    requirements: watch("requirements") ?? "",
+                    definition_of_done: watch("definition_of_done") ?? [],
+                  }}
+                  onChange={(next) => {
+                    setValue("requirements", next.requirements, { shouldDirty: true });
+                    setValue("definition_of_done", next.definition_of_done, { shouldDirty: true });
+                    handleFormChange();
+                  }}
+                />
+              </div>
               <WorkItemModalAdditionalProperties
                 isDraft={isDraft}
                 workItemId={data?.id ?? data?.sourceIssueId}
@@ -512,6 +532,7 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
                   className="flex items-center justify-end gap-4 border-t-[0.5px] border-subtle pt-6 pb-3"
                   tabIndex={getIndex("create_more")}
                 >
+                  {/* oxlint-disable jsx-a11y/prefer-tag-over-role -- ToggleSwitch already renders a button. */}
                   {!data?.id && (
                     <div
                       className="inline-flex cursor-pointer items-center gap-1.5"
@@ -525,6 +546,7 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
                       <span className="text-caption-sm-regular">{t("create_more")}</span>
                     </div>
                   )}
+                  {/* oxlint-enable jsx-a11y/prefer-tag-over-role */}
                   <div className="flex items-center gap-2">
                     <div tabIndex={getIndex("discard_button")}>
                       <Button

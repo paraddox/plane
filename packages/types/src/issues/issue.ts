@@ -5,6 +5,7 @@
  */
 
 import type { TIssuePriorities } from "../issues";
+import type { TAcceptanceCriterion } from "../coordination";
 import type { TStateGroups } from "../state";
 import type { TIssuePublicComment } from "./activity/issue_comment";
 import type { TIssueAttachment } from "./issue_attachment";
@@ -89,6 +90,11 @@ type IssueRelation = {
 
 export type TIssue = TBaseIssue & {
   description_html?: string;
+  requirements?: string;
+  definition_of_done?: TAcceptanceCriterion[];
+  release_id?: string | null;
+  spec_revision?: number;
+  expected_revision?: number;
   is_subscribed?: boolean;
   parent?: Partial<TBaseIssue>;
   issue_reactions?: TIssueReaction[];

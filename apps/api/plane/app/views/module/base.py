@@ -25,7 +25,7 @@ from django.db.models import (
     Case,
     When,
 )
-from django.db import models
+from django.db import models, transaction
 from django.db.models.functions import Coalesce, Cast, Concat
 from django.core.serializers.json import DjangoJSONEncoder
 from django.utils import timezone
@@ -50,6 +50,7 @@ from plane.app.serializers import (
     ModuleWriteSerializer,
 )
 from plane.bgtasks.issue_activities_task import issue_activity
+from plane.coordination.modules import remove_module_assignments
 from plane.db.models import (
     Issue,
     Module,
@@ -721,6 +722,7 @@ class ModuleViewSet(BaseViewSet):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     @allow_permission([ROLE.ADMIN], creator=True, model=Module)
+    @transaction.atomic
     def destroy(self, request, slug, project_id, pk):
         module = Module.objects.get(workspace__slug=slug, project_id=project_id, pk=pk)
 
@@ -741,7 +743,7 @@ class ModuleViewSet(BaseViewSet):
         ]
         module.delete()
         # Delete the module issues
-        ModuleIssue.objects.filter(module=pk, project_id=project_id).delete()
+        remove_module_assignments(request, module)
         # Delete the user favorite module
         UserFavorite.objects.filter(
             user=request.user,

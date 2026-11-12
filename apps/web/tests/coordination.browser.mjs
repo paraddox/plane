@@ -70,20 +70,69 @@ try {
   assert.ok(release);
   await page.goto(`${web}/${fixture.workspace}/projects/${fixture.project}/issues/${fixture.issue}/`);
   const panel = page.getByRole("region", { name: "Agent workflow", exact: true });
-  await panel.getByRole("button", { name: "Configure task", exact: true }).click();
-  await panel
+  const intent = page.getByRole("region", { name: "Task requirements", exact: true });
+  await intent
     .getByLabel("Requirements", { exact: true })
     .fill("Deliver the API and web behavior with traceable acceptance evidence.");
-  await panel
+  await intent
     .getByRole("textbox", { name: "Acceptance criterion 1", exact: true })
     .fill("The acceptance tests pass for the reviewed code revision.");
-  await panel.getByLabel("Project release", { exact: true }).selectOption(release.id);
-  await panel.getByRole("button", { name: "Save specification", exact: true }).click();
-  await panel.getByRole("button", { name: "Edit specification", exact: true }).waitFor();
+  await intent.getByRole("textbox", { name: "Acceptance criterion 1", exact: true }).press("Tab");
+  await intent
+    .getByRole("status")
+    .filter({ hasText: /^Saved$/ })
+    .waitFor();
+  const releaseUpdated = page.waitForResponse(
+    (response) => response.request().method() === "PATCH" && response.url().endsWith(`/issues/${fixture.issue}/`)
+  );
+  let received;
+  let finish;
+  const receivedPatch = new Promise((resolve) => {
+    received = resolve;
+  });
+  const finishPatch = new Promise((resolve) => {
+    finish = resolve;
+  });
+  const taskRoute = `**/api/workspaces/${fixture.workspace}/projects/${fixture.project}/issues/${fixture.issue}/`;
+  const holdRelease = async (route) => {
+    if (route.request().method() !== "PATCH") return route.continue();
+    const response = await route.fetch();
+    received();
+    await finishPatch;
+    await route.fulfill({ response });
+  };
+  await page.route(taskRoute, holdRelease);
+  await page.getByLabel("Release", { exact: true }).selectOption(release.id);
+  await receivedPatch;
+  try {
+    assert.equal(
+      await panel.getByLabel("Authorize automatic merge").isDisabled(),
+      true,
+      "Approval controls must wait for native task edits to finish"
+    );
+  } finally {
+    finish();
+  }
+  assert.equal((await releaseUpdated).status(), 200);
+  await page.unroute(taskRoute, holdRelease);
+  await page.locator('select[aria-label="Release"]:not([disabled])').waitFor();
+  const authorized = page.waitForResponse(
+    (response) =>
+      response.request().method() === "PUT" && response.url().endsWith(`/work-items/${fixture.issue}/auto-merge/`)
+  );
   await panel.getByLabel("Authorize automatic merge").check();
-  await panel.getByText("Required reviewers (0)", { exact: true }).click();
-  await panel.getByRole("checkbox", { name: "Designated Reviewer", exact: true }).check();
-  await panel.getByRole("button", { name: "Submit to agents", exact: true }).click();
+  assert.equal((await authorized).status(), 200);
+  const reviewerSection = panel.locator("details").first();
+  if ((await reviewerSection.getAttribute("open")) === null) await reviewerSection.locator("summary").click();
+  const reviewerCheckbox = panel.getByRole("checkbox", { name: "Designated Reviewer", exact: true });
+  if (!(await reviewerCheckbox.isChecked())) {
+    const reviewersSaved = page.waitForResponse(
+      (response) =>
+        response.request().method() === "PUT" && response.url().endsWith(`/work-items/${fixture.issue}/reviewers/`)
+    );
+    await reviewerCheckbox.check();
+    assert.equal((await reviewersSaved).status(), 200);
+  }
   await panel.getByText(/^Ready for agent \/ Spec \d+$/).waitFor();
   let overview = await api(root + task + "overview/");
   assert.equal(overview.contract.status, "ready");
@@ -106,14 +155,13 @@ try {
     key,
     method: "POST",
     expected: 201,
-    data: { text: "Should the result include both API and web changes?", blocking: true },
+    data: { text: `Should the result include both API and web changes? (attempt ${run.attempt})`, blocking: true },
   });
   await panel.getByRole("button", { name: "Refresh workflow", exact: true }).click();
-  await panel
-    .getByRole("textbox", { name: `Answer: ${question.text}`, exact: true })
-    .fill("Yes, include both and their acceptance evidence.");
+  const answerText = `Yes, include both and their acceptance evidence (attempt ${run.attempt}).`;
+  await panel.getByRole("textbox", { name: `Answer: ${question.text}`, exact: true }).fill(answerText);
   await panel.getByRole("button", { name: "Post answer", exact: true }).click();
-  await panel.getByText("Yes, include both and their acceptance evidence.", { exact: true }).waitFor();
+  await panel.getByText(answerText, { exact: true }).waitFor();
   overview = await api(machine + task + "overview/", { key });
   const answeredQuestion = overview.questions.find((value) => value.id === question.id);
   await api(machine + task + `questions/${question.id}/resolve/`, {
@@ -126,7 +174,7 @@ try {
     method: "POST",
     data: { head_sha: "a".repeat(40), pull_request: 7 },
   });
-  const screenshotSummary = "Agent screenshot from acceptance verification";
+  const screenshotSummary = `Agent screenshot from acceptance verification (attempt ${run.attempt})`;
   await Promise.all(
     [
       {
@@ -213,14 +261,14 @@ try {
     true
   );
   await page.screenshot({ path: `${output}/task-evidence.png`, fullPage: true });
-  await panel.getByRole("heading", { name: "Agent workflow", exact: true }).scrollIntoViewIfNeeded();
+  await panel.getByRole("heading", { name: "Execution", exact: true }).scrollIntoViewIfNeeded();
   await page.screenshot({ path: `${output}/task-desktop.png`, fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.waitForFunction(() => {
     const sidebar = document.querySelector("#main-sidebar");
     return sidebar instanceof HTMLElement && sidebar.style.width === "0px" && getComputedStyle(sidebar).opacity === "0";
   });
-  await panel.getByRole("heading", { name: "Agent workflow", exact: true }).scrollIntoViewIfNeeded();
+  await panel.getByRole("heading", { name: "Execution", exact: true }).scrollIntoViewIfNeeded();
   await fits(page, "Mobile task");
   await page.screenshot({ path: `${output}/task-mobile.png`, fullPage: true });
 
@@ -236,19 +284,11 @@ try {
   await reviewerPanel.getByText("Designated Reviewer: Approved / Code 1", { exact: true }).waitFor();
   assert.equal(await reviewerPanel.getByLabel("Authorize automatic merge").isDisabled(), true);
   overview = await api(root + task + "overview/");
-  assert.equal(overview.decisions.length, 2);
+  assert.equal(overview.decisions.filter((row) => row.run === run.id).length, 2);
   assert.equal(overview.contract.status, "review");
-  assert.equal(overview.questions[0].resolved_at !== null, true);
-  assert.equal(overview.evidence.length, 3);
-  const hydrationWarnings = errors.filter(
-    (message) =>
-      message.startsWith("Hydration failed because") || message.startsWith("There was an error while hydrating.")
-  );
-  // These originate in the unchanged app shell before the coordination route loads.
-  assert.deepEqual(
-    errors.filter((message) => !hydrationWarnings.includes(message)),
-    []
-  );
+  assert.equal(overview.questions.find((row) => row.id === question.id).resolved_at !== null, true);
+  assert.equal(overview.evidence.filter((row) => row.run === run.id).length, 3);
+  assert.deepEqual(errors, []);
   console.log(
     JSON.stringify({
       result: "passed",
@@ -258,7 +298,8 @@ try {
         "specification",
         "advance authorization",
         "required reviewer",
-        "submit and claim",
+        "automatic readiness and claim",
+        "native edit and approval revision fencing",
         "human clarification",
         "code evidence",
         "owner approval",
@@ -266,7 +307,6 @@ try {
         "desktop and mobile layouts",
       ],
       output,
-      hydration_warnings: hydrationWarnings.length,
     })
   );
 } catch (error) {

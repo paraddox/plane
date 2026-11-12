@@ -503,6 +503,7 @@ class ModuleDetailAPIEndpoint(BaseAPIView):
             404: MODULE_NOT_FOUND_RESPONSE,
         },
     )
+    @transaction.atomic
     def delete(self, request, slug, project_id, pk):
         """Delete module
 
@@ -544,7 +545,9 @@ class ModuleDetailAPIEndpoint(BaseAPIView):
         )
         module.delete()
         # Delete the module issues
-        ModuleIssue.objects.filter(module=pk, project_id=project_id).delete()
+        from plane.coordination.modules import remove_module_assignments
+
+        remove_module_assignments(request, module)
         # Delete the user favorite module
         UserFavorite.objects.filter(entity_type="module", entity_identifier=pk, project_id=project_id).delete()
         return Response(status=status.HTTP_204_NO_CONTENT)

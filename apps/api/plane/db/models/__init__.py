@@ -9,6 +9,8 @@ from .asset import FileAsset
 from .base import BaseModel
 from .cycle import Cycle, CycleIssue, CycleUserProperties
 from .coordination import (
+    AgentSubscription,
+    AgentEventDelivery,
     AgentProjectAccess,
     AgentRun,
     CoordinationEvent,

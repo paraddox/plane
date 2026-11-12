@@ -37,16 +37,15 @@ export class CoordinationService extends APIService {
       throw error;
     }
   }
-  async saveContract(
+  async updateTask(
     workspace: string,
     project: string,
     issue: string,
-    input: TContractInput
-  ): Promise<TWorkItemContract> {
-    return (await this.put(this.path(workspace, project) + `work-items/${issue}/contract/`, input)).data;
-  }
-  async submit(workspace: string, project: string, issue: string): Promise<TWorkItemContract> {
-    return (await this.post(this.path(workspace, project) + `work-items/${issue}/submit/`, {})).data;
+    input: Partial<TContractInput>
+  ): Promise<TContractInput & { spec_revision: number }> {
+    return (
+      await this.patch(`/api/workspaces/${encodeURIComponent(workspace)}/projects/${project}/issues/${issue}/`, input)
+    ).data;
   }
   async authorizeAdvance(
     workspace: string,

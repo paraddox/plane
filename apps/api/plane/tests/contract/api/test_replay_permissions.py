@@ -98,7 +98,7 @@ def create_intake_item(project, creator, status=IntakeIssueStatus.PENDING):
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("is_creator", [False, True])
-def test_intake_patch_replay_rechecks_guest_ownership(
+def test_personal_keys_cannot_patch_agent_first_intake_tasks(
     replay_context, create_user, api_token, django_capture_on_commit_callbacks, is_creator
 ):
     project, membership, other, tasks = replay_context
@@ -108,15 +108,15 @@ def test_intake_patch_replay_rechecks_guest_ownership(
     payload = {"issue": {"name": "Updated intake work item"}}
     with django_capture_on_commit_callbacks(execute=True):
         updated = call(IntakeIssueDetailAPIEndpoint, "patch", project, create_user, api_token, path, payload, **kwargs)
-    assert updated.status_code == 200
+    assert updated.status_code == 403
     event_counts = [task.call_count for task in tasks]
 
     membership.role = ROLE.GUEST.value
     membership.save()
     with django_capture_on_commit_callbacks(execute=True):
         replay = call(IntakeIssueDetailAPIEndpoint, "patch", project, create_user, api_token, path, payload, **kwargs)
-    assert replay.status_code == (200 if is_creator else 400)
-    assert (replay.get("Idempotency-Replayed") == "true") is is_creator
+    assert replay.status_code == (403 if is_creator else 400)
+    assert "Idempotency-Replayed" not in replay
     assert [task.call_count for task in tasks] == event_counts
 
 
@@ -129,7 +129,7 @@ def test_intake_patch_replay_rechecks_guest_ownership(
         (False, IntakeIssueStatus.ACCEPTED),
     ],
 )
-def test_intake_delete_replay_preserves_existing_creator_and_status_rules(
+def test_personal_keys_cannot_delete_agent_first_intake_tasks(
     replay_context, create_user, api_token, django_capture_on_commit_callbacks, is_creator, status
 ):
     project, membership, other, tasks = replay_context
@@ -138,17 +138,16 @@ def test_intake_delete_replay_preserves_existing_creator_and_status_rules(
     kwargs = {"slug": project.workspace.slug, "project_id": project.pk, "issue_id": item.issue_id}
     with django_capture_on_commit_callbacks(execute=True):
         deleted = call(IntakeIssueDetailAPIEndpoint, "delete", project, create_user, api_token, path, **kwargs)
-    assert deleted.status_code == 204
-    assert not IntakeIssue.objects.filter(pk=item.pk).exists()
+    assert deleted.status_code == 403
+    assert IntakeIssue.objects.filter(pk=item.pk).exists()
     event_counts = [task.call_count for task in tasks]
 
     membership.role = ROLE.MEMBER.value
     membership.save()
-    allowed = is_creator or status == IntakeIssueStatus.ACCEPTED
     with django_capture_on_commit_callbacks(execute=True):
         replay = call(IntakeIssueDetailAPIEndpoint, "delete", project, create_user, api_token, path, **kwargs)
-    assert replay.status_code == (204 if allowed else 403)
-    assert (replay.get("Idempotency-Replayed") == "true") is allowed
+    assert replay.status_code == 403
+    assert "Idempotency-Replayed" not in replay
     assert [task.call_count for task in tasks] == event_counts
 
 

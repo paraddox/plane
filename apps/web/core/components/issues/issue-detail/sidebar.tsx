@@ -5,6 +5,7 @@
  */
 
 import { observer } from "mobx-react";
+import { Package } from "lucide-react";
 // i18n
 import { useTranslation } from "@plane/i18n";
 // ui
@@ -32,6 +33,7 @@ import { StateDropdown } from "@/components/dropdowns/state/dropdown";
 // hooks
 import { useProjectEstimates } from "@/hooks/store/estimates";
 import { useIssueDetail } from "@/hooks/store/use-issue-detail";
+import { useTaskPermissions } from "@/hooks/store/use-task-permissions";
 import { useMember } from "@/hooks/store/use-member";
 import { useProject } from "@/hooks/store/use-project";
 import { useProjectState } from "@/hooks/store/use-project-state";
@@ -47,6 +49,7 @@ import { IssueCycleSelect } from "./cycle-select";
 import { IssueLabel } from "./label";
 import { IssueModuleSelect } from "./module-select";
 import type { TIssueOperations } from "./root";
+import { IssueReleaseSelect } from "./release-select";
 
 type Props = {
   workspaceSlug: string;
@@ -59,6 +62,7 @@ type Props = {
 export const IssueDetailsSidebar = observer(function IssueDetailsSidebar(props: Props) {
   const { t } = useTranslation();
   const { workspaceSlug, projectId, issueId, issueOperations, isEditable } = props;
+  const { canEditIntent } = useTaskPermissions(workspaceSlug, projectId, issueId);
   // store hooks
   const { getProjectById } = useProject();
   const { areEstimateEnabledByProjectId } = useProjectEstimates();
@@ -107,7 +111,7 @@ export const IssueDetailsSidebar = observer(function IssueDetailsSidebar(props: 
               <MemberDropdown
                 value={issue?.assignee_ids ?? undefined}
                 onChange={(val) => issueOperations.update(workspaceSlug, projectId, issueId, { assignee_ids: val })}
-                disabled={!isEditable}
+                disabled={!isEditable || !canEditIntent}
                 projectId={projectId?.toString() ?? ""}
                 placeholder={t("issue.add.assignee")}
                 multiple
@@ -239,6 +243,14 @@ export const IssueDetailsSidebar = observer(function IssueDetailsSidebar(props: 
               </SidebarPropertyListItem>
             )}
 
+            <SidebarPropertyListItem icon={Package} label="Release">
+              <IssueReleaseSelect
+                workspaceSlug={workspaceSlug}
+                projectId={projectId}
+                issueId={issueId}
+                disabled={!isEditable || !!issue.archived_at}
+              />
+            </SidebarPropertyListItem>
             <SidebarPropertyListItem icon={ParentPropertyIcon} label={t("common.parent")}>
               <IssueParentSelectRoot
                 className="h-7.5 w-full grow"

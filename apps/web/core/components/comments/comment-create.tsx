@@ -65,13 +65,13 @@ export const CommentCreate = observer(function CommentCreate(props: TCommentCrea
     try {
       const comment = await activityOperations.createComment(formData);
       if (comment?.id) onSubmitCallback?.(comment.id);
-      if (uploadedAssetIds.length > 0) {
+      if (uploadedAssetIds.length > 0 && comment?.id) {
         if (projectId) {
-          await fileService.updateBulkProjectAssetsUploadStatus(workspaceSlug, projectId.toString(), entityId, {
+          await fileService.updateBulkProjectAssetsUploadStatus(workspaceSlug, projectId.toString(), comment.id, {
             asset_ids: uploadedAssetIds,
           });
         } else {
-          await fileService.updateBulkWorkspaceAssetsUploadStatus(workspaceSlug, entityId, {
+          await fileService.updateBulkWorkspaceAssetsUploadStatus(workspaceSlug, comment.id, {
             asset_ids: uploadedAssetIds,
           });
         }
@@ -92,6 +92,7 @@ export const CommentCreate = observer(function CommentCreate(props: TCommentCrea
 
   return (
     <div
+      role="group"
       className={cn("sticky bottom-0 z-[4] bg-surface-1 sm:static")}
       onKeyDown={(e) => {
         if (

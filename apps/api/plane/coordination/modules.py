@@ -30,6 +30,23 @@ class ModuleAssignmentSerializer(serializers.Serializer):
 
 
 @transaction.atomic
+def remove_module_assignments(request, module):
+    from .changes import emit_task_change
+
+    issue_ids = list(
+        Issue.all_objects.select_for_update()
+        .filter(pk__in=ModuleIssue.objects.filter(module=module).values("issue_id"))
+        .order_by("id")
+        .values_list("id", flat=True)
+    )
+    ModuleIssue.objects.filter(module=module).delete()
+    for issue_id in issue_ids:
+        emit_task_change(
+            issue_id, "task.modules_changed", actor=request.user, payload={"added": [], "removed": [str(module.pk)]}
+        )
+
+
+@transaction.atomic
 def assign_modules(request, project, issue_id, added, removed):
     issue = get_object_or_404(Issue.objects.select_for_update(), pk=issue_id, project=project)
     target_ids = set(added) | set(removed)
@@ -67,4 +84,13 @@ def assign_modules(request, project, issue_id, added, removed):
                 notification=True,
                 origin=base_host(request=request, is_app=True),
             )
+    if additions or removals:
+        from .changes import emit_task_change
+
+        emit_task_change(
+            issue.pk,
+            "task.modules_changed",
+            actor=request.user,
+            payload={"added": sorted(str(pk) for pk in additions), "removed": sorted(str(pk) for pk in removals)},
+        )
     return list(ModuleIssue.objects.filter(issue=issue).order_by("module_id").values_list("module_id", flat=True))

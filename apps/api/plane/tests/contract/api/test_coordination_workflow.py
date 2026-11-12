@@ -12,6 +12,7 @@ from plane.db.models import (
     CoordinationEvent,
     FileAsset,
     Issue,
+    IssueAssignee,
     ProjectMember,
     RunTarget,
     User,
@@ -32,14 +33,17 @@ def guest_access(execution):
     membership = ProjectMember.objects.create(project=project, member=guest, role=5)
     owned = Issue(project=project, name="Guest-created task", created_by=guest)
     owned.save(disable_auto_set_user=True)
-    WorkItemContract.objects.create(
-        project=project,
+    WorkItemContract.objects.update_or_create(
         issue=owned,
-        owner=contract.owner,
-        status="ready",
-        requirements="Guest task requirement",
-        definition_of_done=[{"id": str(uuid4()), "description": "Guest acceptance"}],
+        defaults={
+            "project": project,
+            "owner": contract.owner,
+            "status": "ready",
+            "requirements": "Guest task requirement",
+            "definition_of_done": [{"id": str(uuid4()), "description": "Guest acceptance"}],
+        },
     )
+    IssueAssignee.objects.create(project=project, issue=owned, assignee=contract.owner)
     hidden_run = claim(execution)
     owned_run = dispatcher.post(
         prefix + f"work-items/{owned.pk}/claim/",
@@ -122,7 +126,11 @@ def test_events_are_replayable_and_catch_up_from_committed_cursor(execution):
     run_id = claim(execution)
     first = dispatcher.get(prefix + "events/?after=0")
     assert first.status_code == 200, first.data
-    assert first.data["events"][0]["kind"] == "run.claimed"
+    assert [event["kind"] for event in first.data["events"]] == [
+        "task.specification_created",
+        "task.ready",
+        "run.claimed",
+    ]
     cursor = first.data["next_cursor"]
     assert dispatcher.get(prefix + "events/?after=0").data == first.data
     worker_client(execution, run_id)

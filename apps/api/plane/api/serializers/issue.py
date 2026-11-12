@@ -11,6 +11,7 @@ from django.db import IntegrityError
 
 #  Third party imports
 from rest_framework import serializers
+from plane.coordination.task_fields import TaskFieldsSerializer
 
 # Module imports
 from plane.db.models import (
@@ -45,7 +46,7 @@ from django.core.exceptions import ValidationError
 from django.core.validators import URLValidator
 
 
-class IssueSerializer(BaseSerializer):
+class IssueSerializer(TaskFieldsSerializer, BaseSerializer):
     """
     Comprehensive work item serializer with full relationship management.
 

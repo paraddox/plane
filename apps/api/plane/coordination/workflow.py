@@ -36,6 +36,8 @@ from .contracts import (
     emit_event,
     locked_contract,
     require_human,
+    is_task_owner,
+    task_owners,
     validate_owner,
 )
 from .execution import lock_execution_credential, locked_run
@@ -120,7 +122,12 @@ def ask_question(request, project, issue_id, data):
     serializer = QuestionInputSerializer(data=data)
     serializer.is_valid(raise_exception=True)
     values = serializer.validated_data
-    respondent = values.pop("respondent", None) or run.contract.owner
+    respondent = values.pop("respondent", None)
+    if respondent is None:
+        owners = task_owners(run.contract)
+        respondent = owners.filter(pk=run.contract.owner_id).first() or owners.order_by("id").first()
+    if respondent is None:
+        raise CoordinationConflict("Assign an active human owner before asking a question.")
     validate_owner(respondent, project)
     question = WorkItemQuestion.objects.create(
         project=project,
@@ -155,7 +162,7 @@ def answer_question(request, project, issue_id, question_id, data):
         contract=contract,
         spec_revision=contract.spec_revision,
     )
-    if request.user.pk not in (question.respondent_id, contract.owner_id):
+    if request.user.pk != question.respondent_id and not is_task_owner(request.user, contract):
         raise PermissionDenied("Only the intended respondent or task owner may answer this question.")
     if contract.status in ("merging", "merged", "cancelled", "draft") or question.resolved_at:
         raise CoordinationConflict("This question is no longer open for answers.")

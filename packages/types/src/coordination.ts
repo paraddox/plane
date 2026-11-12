@@ -19,6 +19,7 @@ export type TWorkItemContract = {
   issue: string;
   project: string;
   owner: string;
+  owner_ids: string[];
   release: string | null;
   requirements: string;
   definition_of_done: TAcceptanceCriterion[];
@@ -32,7 +33,8 @@ export type TWorkItemContract = {
   merged_at: string | null;
   updated_at: string;
 };
-export type TContractInput = Pick<TWorkItemContract, "owner" | "release" | "requirements" | "definition_of_done"> & {
+export type TContractInput = Pick<TWorkItemContract, "requirements" | "definition_of_done"> & {
+  release_id?: string | null;
   expected_revision?: number;
 };
 export type TProjectRelease = {
@@ -70,6 +72,9 @@ export type TAgentRun = {
   spec_snapshot: {
     issue_id: string;
     owner_id: string;
+    owner_ids: string[];
+    name: string;
+    description_html: string;
     requirements: string;
     definition_of_done: TAcceptanceCriterion[];
     release_id: string | null;
@@ -156,6 +161,7 @@ export type TMergeAttempt = {
   finished_at: string | null;
 };
 export type TCoordinationOverview = {
+  inherited_from: string | null;
   contract: TWorkItemContract;
   runs: TAgentRun[];
   questions: TWorkItemQuestion[];

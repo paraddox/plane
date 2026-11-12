@@ -55,7 +55,12 @@ class APIToken(BaseModel):
     purpose = models.CharField(
         max_length=20,
         default="personal",
-        choices=[("personal", "Personal"), ("dispatcher", "Dispatcher"), ("execution", "Execution")],
+        choices=[
+            ("personal", "Personal"),
+            ("dispatcher", "Dispatcher"),
+            ("assignment", "Assignment"),
+            ("execution", "Execution"),
+        ],
     )
     delegated_by = models.ForeignKey(
         "self", on_delete=models.SET_NULL, null=True, blank=True, related_name="delegated_keys"

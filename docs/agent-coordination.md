@@ -5,6 +5,11 @@ still checks out code, runs tools/tests, pushes branches, and opens pull request
 Plane supplies versioned product intent, scoped machine access, questions,
 evidence, human decisions, and an agent-initiated guarded merge.
 
+The main agent claims a task and hands it off once. Its worker subscribes directly
+to task notifications and refreshes its own execution access. Plane does not host
+agent prompts or sessions. See [Agent Notifications](agent-notifications.md) for
+the callback protocol, replay and runtime-independent integration example.
+
 ## Project Setup
 
 1. Apply the database migrations, including PostgreSQL completion guards.
@@ -70,13 +75,17 @@ GitHub configuration; no production deployment is performed by this branch.
 
 ## Human Workflow
 
-Create a normal work item, then configure its **Agent workflow** panel:
+Every work item is agent-first. Requirements and definition of done are native
+fields in task creation, direct detail, and all preview layouts:
 
-- The human owner defaults to the creator, independently of agent assignment.
+- The creator and active human assignees are owners. Agent identity belongs to
+  the execution run, not the human-assignee field.
 - Requirements and stable definition-of-done criteria form a versioned spec.
   Release assignment is project-local. Existing priority and multiple modules
   remain available.
-- Save the complete spec and submit it to agents. Drafts do not dispatch.
+- Open tasks are discoverable immediately, even with empty requirements or
+  acceptance criteria. Agents claim incomplete work to ask blocking questions;
+  incomplete intent cannot pass review-ready or merge. Drafts do not dispatch.
 - The owner may authorize automatic merge in advance for that spec revision.
   Otherwise, the owner or designated reviewers approve the implemented code.
 - Every requested reviewer is a required gate, even with advance authorization
@@ -87,10 +96,12 @@ Create a normal work item, then configure its **Agent workflow** panel:
   resolve a blocking question; the executing agent acknowledges resolution.
 - Decisions bind to the run, spec revision, code revision, head SHA, and PR.
   Changing code requires fresh review. Changing material spec inputs cancels old
-  execution grants and clears advance permission. Returning to an earlier SHA
+  execution grants and clears advance permission. A handed-off assignment and its
+  notification route survive: its worker reads and explicitly acknowledges the
+  new revision before obtaining fresh execution access. Returning to an earlier SHA
   does not reactivate an older code-review decision.
 - A cancellation closes the run and clears advance permission. The owner/admin
-  may explicitly resubmit the unchanged spec. Repeating cancellation of an old
+  may reopen it through the normal task state property. Repeating cancellation of an old
   cancelled run cannot cancel its replacement.
 
 The agent, not an autonomous merge service, submits the final merge command after
@@ -106,6 +117,9 @@ issue's state cannot bypass the PostgreSQL completion guards.
 Authenticate with `X-Api-Key`. Keys never grant human approval rights, including
 human-owned personal keys. Registered dispatcher keys dispatch work; execution
 keys perform only their granted task/run actions. Unlisted operations are denied.
+Assignment keys only read assigned context/events, manage their own callback
+subscriptions and refresh access for that same run. They cannot perform task
+writes, delegate access, approve or merge.
 
 All paths below are relative to:
 
@@ -124,6 +138,7 @@ All paths below are relative to:
 | POST   | `work-items/{issue_id}/claim/`                  | Atomically claim one task                      |
 | GET    | `runs/{run_id}/`                                | Run metadata, never a recoverable raw key      |
 | POST   | `runs/{run_id}/credentials/`                    | Issue/rotate the worker's execution key        |
+| POST   | `runs/{run_id}/handoff/`                        | Return a durable worker assignment key once    |
 | POST   | `runs/{run_id}/renew/`                          | Extend a still-authorized lease                |
 | POST   | `runs/{run_id}/reconcile/`                      | Observe a pending merge; never initiate one    |
 
@@ -138,8 +153,10 @@ Claim input:
 ```
 
 Claim returns `201` with run metadata. A live competing claim returns `409`.
-Expired active runs can be reclaimed from In Progress, Awaiting Input, or Review;
+Before handoff, expired active runs can be reclaimed from In Progress, Awaiting Input, or Review;
 the new attempt fences old keys and retains relevant questions/child scope.
+A handed-off run cannot be reclaimed just because its execution lease expires;
+the assigned worker can recover its own access after waiting for a human.
 A possibly merged run is never reassigned merely because its lease elapsed.
 
 Credential issuance returns `201` with `id`, `token`, and `expired_at`, with
@@ -149,12 +166,15 @@ Rotation revokes older run keys. `Idempotency-Key` is rejected for this endpoint
 so plaintext credentials never enter the replay-response store. If the response
 is lost, issue a replacement; the previous key is revoked.
 
-Renew leases and rotate credentials while authorized and before expiry. A fenced
+Before handoff, dispatchers renew leases and rotate credentials while authorized and before expiry. A fenced
 pending merge cannot be reassigned: its owning dispatcher may restore that same
 run's expired lease, then rotate its execution credential so the assigned agent
 can finish recovery. This does not revive expired active runs, bypass revoked
 access, or let workers renew themselves. Worker heartbeats do not extend their
-own authority. Disabled execution, removed
+own authority. After handoff, the separate assignment key calls
+`runs/{run_id}/refresh/` with `expected_revision` to extend the same run's lease
+and receive a fresh short-lived execution key, without main-agent calls.
+Disabled execution, removed
 membership/identity access, parent-key revocation/expiry, cancellation, stale
 specs, and confirmed completion fence execution keys. Authentication reads the
 primary database even when business reads use a replica.
@@ -167,8 +187,10 @@ UUIDs and commit-ordered project sequence numbers. Responses contain `events`,
 policy. Persist the cursor only after processing the page. Retry failed reads,
 deduplicate event IDs, and drain pages while `has_more` is true. After a
 disconnect, continue from the last durable cursor and reconcile `candidates/`
-and known runs. Re-reading events never grants another live claim. There is no
-new outbound webhook sender, delivery secret, or polling-interval policy.
+and known runs. Re-reading events never grants another live claim. Workers use
+`runs/{run_id}/events/` for their root and granted children only; they cannot read
+the project-wide feed. Signed callbacks and durable per-subscription delivery
+records are also available; see [Agent Notifications](agent-notifications.md).
 
 ### Assigned Execution
 
@@ -292,9 +314,12 @@ rule is applied.
 Human controls use the same project path under `/api/` instead of `/api/v1/`,
 with normal cookie authentication and CSRF protection:
 
-- `PUT/PATCH work-items/{issue_id}/contract/`: owner/admin spec edits with
-  `expected_revision` for existing specs.
-- `POST work-items/{issue_id}/submit/`: owner/admin readiness or resubmission.
+- Native task `POST /api/workspaces/{slug}/projects/{project_id}/issues/`
+  accepts `requirements`, `definition_of_done` and project-local `release_id`.
+  Native task `PATCH .../issues/{issue_id}/` edits these fields with
+  `expected_revision`. Reads include `spec_revision`. There is no separate
+  configuration or submission endpoint. Intent edits invalidate previous runs
+  and advance approvals; description is included in the execution snapshot.
 - `PUT work-items/{issue_id}/auto-merge/`: owner only, with `enabled` and
   `expected_revision`.
 - `PUT work-items/{issue_id}/reviewers/`: owner only, with `reviewers` UUID list

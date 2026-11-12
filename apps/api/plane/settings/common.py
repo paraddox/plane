@@ -293,6 +293,9 @@ CELERY_ACCEPT_CONTENT = ["application/json"]
 
 
 CELERY_IMPORTS = (
+    "plane.bgtasks.coordination_notification_task",
+    "plane.bgtasks.logger_task",
+    "plane.bgtasks.issue_activities_task",
     # scheduled tasks
     "plane.bgtasks.issue_automation_task",
     "plane.bgtasks.exporter_expired_task",
@@ -306,6 +309,13 @@ CELERY_IMPORTS = (
     "plane.bgtasks.issue_version_sync",
     "plane.bgtasks.issue_description_version_sync",
 )
+
+# Inherit the existing webhook sender's transport/retry policy.
+COORDINATION_WEBHOOK_TIMEOUT = float(os.environ.get("COORDINATION_WEBHOOK_TIMEOUT", "30"))
+COORDINATION_WEBHOOK_RETRY_DELAY = float(os.environ.get("COORDINATION_WEBHOOK_RETRY_DELAY", "600"))
+COORDINATION_WEBHOOK_MAX_RETRIES = int(os.environ.get("COORDINATION_WEBHOOK_MAX_RETRIES", "5"))
+if COORDINATION_WEBHOOK_TIMEOUT <= 0 or COORDINATION_WEBHOOK_RETRY_DELAY <= 0 or COORDINATION_WEBHOOK_MAX_RETRIES < 0:
+    raise ValueError("Coordination webhook timeouts/retry delays must be positive and retry counts nonnegative.")
 
 FILE_SIZE_LIMIT = int(os.environ.get("FILE_SIZE_LIMIT", 5242880))
 

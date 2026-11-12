@@ -46,13 +46,15 @@ def execution(coordination, create_user):
         credential_lifetime=timedelta(minutes=5),
         execution_lease=timedelta(minutes=10),
     )
-    owner = WorkItemContract.objects.create(
-        project=project,
+    owner, _ = WorkItemContract.objects.update_or_create(
         issue=issue,
-        owner=create_user,
-        status="ready",
-        requirements="Implement it",
-        definition_of_done=[{"id": str(uuid4()), "description": "Tests pass"}],
+        defaults={
+            "project": project,
+            "owner": create_user,
+            "status": "ready",
+            "requirements": "Implement it",
+            "definition_of_done": [{"id": str(uuid4()), "description": "Tests pass"}],
+        },
     )
     agents = []
     for name, role in (("dispatcher", "dispatcher"), ("worker", "worker")):
@@ -735,7 +737,7 @@ def test_personal_upsert_cannot_update_a_coordinated_task(execution, api_key_cli
 
 
 @pytest.mark.django_db
-def test_personal_upsert_replay_is_denied_after_a_contract_is_added(execution, api_key_client):
+def test_personal_upsert_cannot_mutate_an_automatically_coordinated_import(execution, api_key_client):
     _, _, project, _, contract, _, _, _, _, _ = execution
     url = f"/api/v1/workspaces/{project.workspace.slug}/projects/{project.pk}/work-items/upsert/"
     payload = {"external_id": "ordinary-task", "external_source": "integration", "name": "Imported"}
@@ -744,11 +746,11 @@ def test_personal_upsert_replay_is_denied_after_a_contract_is_added(execution, a
     payload["name"] = "Synced"
     headers = {"HTTP_IDEMPOTENCY_KEY": "ordinary-upsert"}
     updated = api_key_client.put(url, payload, format="json", **headers)
-    assert updated.status_code == 200, updated.data
-    WorkItemContract.objects.create(project=project, issue_id=created.data["id"], owner=contract.owner)
+    assert updated.status_code == 403, updated.data
+    assert WorkItemContract.objects.filter(issue_id=created.data["id"]).exists()
     replay = api_key_client.put(url, payload, format="json", **headers)
     assert replay.status_code == 403, replay.data
-    assert Issue.objects.get(pk=created.data["id"]).name == "Synced"
+    assert Issue.objects.get(pk=created.data["id"]).name == "Imported"
 
 
 @pytest.mark.django_db
@@ -863,19 +865,17 @@ def test_registered_agent_cannot_use_human_session_endpoints(execution):
 
 
 @pytest.mark.django_db
-def test_spec_edit_closes_old_run_and_can_be_submitted_and_claimed_again(execution):
-    _, human, _, issue, _, _, _, _, _, prefix = execution
+def test_spec_edit_closes_old_run_and_is_automatically_claimable_again(execution):
+    _, human, project, issue, _, _, _, _, _, prefix = execution
     first = claim(execution)
     old, _ = worker_client(execution, first)
-    session_prefix = prefix.replace("/api/v1/", "/api/", 1)
     changed = human.patch(
-        session_prefix + f"work-items/{issue.pk}/contract/",
+        f"/api/workspaces/{project.workspace.slug}/projects/{project.pk}/issues/{issue.pk}/",
         {"expected_revision": 1, "requirements": "Revised requirement"},
         format="json",
     )
     assert changed.status_code == 200, changed.data
     assert old.get(prefix + f"runs/{first}/").status_code == 403
-    assert human.post(session_prefix + f"work-items/{issue.pk}/submit/", {}, format="json").status_code == 200
     second = claim(execution)
     assert first != second
     assert AgentRun.objects.get(pk=first).status == "cancelled"
@@ -932,8 +932,8 @@ def test_expired_runs_are_discoverable_and_reclaimable_in_every_working_status(e
 
 
 @pytest.mark.django_db
-def test_cancelled_work_can_be_explicitly_resubmitted_without_changing_the_spec(execution):
-    _, human, _, issue, contract, _, _, _, _, prefix = execution
+def test_cancelled_work_can_be_reopened_through_normal_task_state(execution):
+    _, human, project, issue, contract, _, _, _, _, prefix = execution
     first = claim(execution)
     session = prefix.replace("/api/v1/", "/api/", 1)
     assert (
@@ -945,7 +945,15 @@ def test_cancelled_work_can_be_explicitly_resubmitted_without_changing_the_spec(
     assert human.post(session + f"runs/{first}/cancel/", {}, format="json").status_code == 200
     contract.refresh_from_db()
     assert contract.status == "cancelled" and contract.auto_merge_authorized is False
-    assert human.post(session + f"work-items/{issue.pk}/submit/", {}, format="json").status_code == 200
+    state = State.objects.get(project=project, name="Todo")
+    assert (
+        human.patch(
+            f"/api/workspaces/{project.workspace.slug}/projects/{project.pk}/issues/{issue.pk}/",
+            {"state_id": str(state.pk)},
+            format="json",
+        ).status_code
+        == 200
+    )
     second = claim(execution)
     assert AgentRun.objects.get(pk=second).attempt == 2
     assert human.post(session + f"runs/{first}/cancel/", {}, format="json").status_code == 200

@@ -71,7 +71,7 @@ class WorkItemContract(ProjectBaseModel):
     requirements = models.TextField(blank=True)
     definition_of_done = models.JSONField(default=list)
     spec_revision = models.PositiveIntegerField(default=1)
-    status = models.CharField(max_length=24, choices=Status.choices, default=Status.DRAFT)
+    status = models.CharField(max_length=24, choices=Status.choices, default=Status.READY)
     auto_merge_authorized = models.BooleanField(default=False)
     auto_merge_revision = models.PositiveIntegerField(null=True, blank=True)
     auto_merge_authorized_by = models.ForeignKey(
@@ -110,6 +110,54 @@ class CoordinationEvent(models.Model):
         constraints = [
             models.UniqueConstraint(fields=["project", "sequence"], name="coord_event_project_sequence_unique")
         ]
+
+
+class AgentSubscription(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid4, editable=False)
+    project = models.ForeignKey("db.Project", on_delete=models.CASCADE)
+    dispatcher = models.ForeignKey("db.APIToken", on_delete=models.CASCADE)
+    run = models.ForeignKey("db.AgentRun", on_delete=models.CASCADE, null=True, blank=True)
+    url = models.URLField(max_length=1024)
+    event_types = models.JSONField(default=list)
+    signing_secret = models.CharField(max_length=255)
+    after_sequence = models.PositiveBigIntegerField()
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "agent_subscriptions"
+        ordering = ["created_at", "id"]
+
+
+class AgentEventDelivery(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid4, editable=False)
+    subscription = models.ForeignKey(AgentSubscription, on_delete=models.CASCADE, related_name="deliveries")
+    event = models.ForeignKey(CoordinationEvent, on_delete=models.CASCADE, related_name="deliveries")
+    status = models.CharField(
+        max_length=20,
+        default="pending",
+        choices=[
+            ("pending", "Pending"),
+            ("sending", "Sending"),
+            ("delivered", "Delivered"),
+            ("failed", "Failed"),
+            ("cancelled", "Cancelled"),
+        ],
+    )
+    attempts = models.PositiveIntegerField(default=0)
+    retry_count = models.PositiveIntegerField(default=0)
+    next_attempt_at = models.DateTimeField(default=timezone.now)
+    locked_until = models.DateTimeField(null=True, blank=True)
+    last_status = models.PositiveIntegerField(null=True, blank=True)
+    last_error = models.CharField(max_length=100, blank=True)
+    delivered_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "agent_event_deliveries"
+        ordering = ["event__sequence", "id"]
+        constraints = [models.UniqueConstraint(fields=["subscription", "event"], name="agent_event_delivery_unique")]
+        indexes = [models.Index(fields=["status", "next_attempt_at"], name="agent_delivery_due")]
 
 
 class AgentProjectAccess(ProjectBaseModel):
@@ -152,6 +200,7 @@ class AgentRun(ProjectBaseModel):
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.ACTIVE)
     lease_expires_at = models.DateTimeField()
     last_heartbeat = models.DateTimeField(default=timezone.now)
+    handed_off_at = models.DateTimeField(null=True, blank=True)
     finished_at = models.DateTimeField(null=True, blank=True)
     head_sha = models.CharField(max_length=64, blank=True)
     code_revision = models.PositiveIntegerField(default=0)
