@@ -6,7 +6,7 @@
 from django.utils import timezone
 from django.apps import apps
 from django.conf import settings
-from django.db import models, transaction
+from django.db import IntegrityError, models, transaction
 from django.db.models.deletion import RestrictedError
 from django.db.models.fields.related import OneToOneRel
 
@@ -112,21 +112,36 @@ def restore_related_objects(app_label, model_name, instance_pk, using=None):
     pass
 
 
+def _is_expected_retention_block(error):
+    if isinstance(error, RestrictedError):
+        return True
+    cause = error.__cause__
+    # Migration 0129 identifies its pending-merge deletion fence with this
+    # SQLSTATE/message pair; other integrity failures must remain visible.
+    return (
+        getattr(cause, "sqlstate", None) == "23514"
+        and getattr(getattr(cause, "diag", None), "message_primary", None)
+        == "Reconcile the in-flight merge before deleting task history"
+    )
+
+
 def _hard_delete_unrestricted(queryset):
     try:
         with transaction.atomic():
             queryset.delete()
         return
-    except RestrictedError:
-        pass
+    except IntegrityError as error:
+        if not _is_expected_retention_block(error):
+            raise
 
     # Keep the bulk fast path, isolating retained rows only when necessary.
     for pk in queryset.values_list("pk", flat=True).iterator():
         try:
             with transaction.atomic():
                 queryset.filter(pk=pk).delete()
-        except RestrictedError:
-            continue
+        except IntegrityError as error:
+            if not _is_expected_retention_block(error):
+                raise
 
 
 @shared_task

@@ -170,7 +170,7 @@ creation surfaces, project settings/releases, shared services/types, docs.
 
 ## Final Evidence
 
-- 431 backend API/authentication/security/coordination tests passed with actual
+- 436 backend API/authentication/security/coordination tests passed with actual
   PostgreSQL migrations and Valkey, including the real-HTTP GitHub fixture and
   concurrent claim/credential/revocation checks. Schema validation is included.
 - Main migration 0122 upgraded through 0130 with existing tasks and hashed keys
@@ -359,6 +359,26 @@ The full relevant API/auth/security suite passed 431 tests with real migrations
 and Valkey. Scoped Ruff lint/format and diff checks passed. No frontend, model,
 or migration changes were needed. Further review continues against this updated
 branch until a completed pass finds no actionable issues.
+
+### Continued Review: Pending-Merge Retention
+
+The following full-branch pass identified a second retention failure: purging a
+soft-deleted workspace, project, or contract containing a pending merge raised
+migration 0129's database deletion fence rather than `RestrictedError`, aborting
+unrelated cleanup. Three PostgreSQL/API regressions reproduced that failure.
+
+The purge now classifies this specific guard using its structured PostgreSQL
+SQLSTATE and primary diagnostic message, in both bulk and isolated-row paths.
+Blocked deletion transactions roll back, preserving the uncertain merge and
+retained aggregate while unrelated expired rows are removed. Other integrity
+errors still propagate; two explicit negative cases verify the SQLSTATE and
+message must both match. Retention duration and merge safeguards are unchanged.
+
+The complete relevant backend suite passed 436 tests with actual migrations and
+Valkey. Scoped Ruff lint/format and diff checks passed. No frontend, model, or
+migration changes were needed. The archived-child finding was withdrawn by the
+reviewer after the actual manager SQL and database-lock evidence were supplied.
+Further review continues against the updated branch.
 
 ## Execution Notes
 
