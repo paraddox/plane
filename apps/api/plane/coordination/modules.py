@@ -67,4 +67,13 @@ def assign_modules(request, project, issue_id, added, removed):
                 notification=True,
                 origin=base_host(request=request, is_app=True),
             )
+    if additions or removals:
+        from .changes import emit_task_change
+
+        emit_task_change(
+            issue.pk,
+            "task.modules_changed",
+            actor=request.user,
+            payload={"added": sorted(str(pk) for pk in additions), "removed": sorted(str(pk) for pk in removals)},
+        )
     return list(ModuleIssue.objects.filter(issue=issue).order_by("module_id").values_list("module_id", flat=True))

@@ -106,7 +106,7 @@ def emit_event(project, kind, *, actor, issue=None, revision=None, payload=None)
     sequence = CoordinationSequence.objects.select_for_update().get(project=project)
     sequence.last_value += 1
     sequence.save(update_fields=["last_value"])
-    return CoordinationEvent.objects.create(
+    event = CoordinationEvent.objects.create(
         project=project,
         sequence=sequence.last_value,
         issue=issue,
@@ -115,6 +115,10 @@ def emit_event(project, kind, *, actor, issue=None, revision=None, payload=None)
         spec_revision=revision,
         payload=payload or {},
     )
+    from .notifications import queue_event
+
+    queue_event(event)
+    return event
 
 
 @transaction.atomic
@@ -246,6 +250,21 @@ def edit_contract(request, project, issue_id, data, *, material_change=False):
         clear_advance_authorization(contract)
         stale_runs = AgentRun.objects.select_for_update().filter(contract=contract, status="active")
         for run in stale_runs:
+            if run.handed_off_at:
+                contract.status = WorkItemContract.Status.IN_PROGRESS
+                run.credentials.filter(purpose="execution").update(is_active=False)
+                # Existing human questions and required child scope remain gates.
+                contract.questions.filter(spec_revision=contract.spec_revision - 1, resolved_at__isnull=True).update(
+                    spec_revision=contract.spec_revision
+                )
+                contract.children.filter(spec_revision=contract.spec_revision - 1).update(
+                    spec_revision=contract.spec_revision
+                )
+                if contract.questions.filter(
+                    spec_revision=contract.spec_revision, blocking=True, resolved_at__isnull=True
+                ).exists():
+                    contract.status = WorkItemContract.Status.AWAITING_INPUT
+                continue
             run.status = AgentRun.Status.CANCELLED
             run.finished_at = timezone.now()
             run.save(update_fields=["status", "finished_at", "updated_at"])

@@ -38,6 +38,9 @@ from .execution import (
     issue_execution_credential,
     renew_execution,
     require_dispatcher,
+    handoff_execution,
+    refresh_execution,
+    RefreshSerializer,
 )
 
 
@@ -308,6 +311,56 @@ class CredentialEndpoint(MachineCoordinationMixin, CoordinationEndpoint):
         return response
 
 
+class HandoffResponseSerializer(serializers.Serializer):
+    id = serializers.UUIDField()
+    token = serializers.CharField()
+    run = RunSerializer()
+    event_cursor = serializers.IntegerField()
+
+
+class HandoffEndpoint(MachineCoordinationMixin, CoordinationEndpoint):
+    serializer_class = HandoffResponseSerializer
+    coordination_action = "handoff"
+    idempotency_unsupported_methods = {"POST"}
+
+    @extend_schema(tags=["Agent Execution"], request=None, responses={201: HandoffResponseSerializer})
+    def post(self, request, slug, project_id, run_id):
+        project = self.project(request, write=True)
+        run, credential, raw, cursor = handoff_execution(request, project, run_id)
+        response = Response(
+            {
+                "id": str(credential.pk),
+                "token": raw,
+                "run": RunSerializer(run).data,
+                "event_cursor": cursor,
+            },
+            status=201,
+        )
+        response["Cache-Control"] = "no-store"
+        return response
+
+
+class RefreshEndpoint(MachineCoordinationMixin, CoordinationEndpoint):
+    serializer_class = RefreshSerializer
+    coordination_action = "refresh"
+    idempotency_unsupported_methods = {"POST"}
+
+    @extend_schema(tags=["Agent Execution"], request=RefreshSerializer, responses={201: CredentialResponseSerializer})
+    def post(self, request, slug, project_id, run_id):
+        project = self.project(request, write=True)
+        credential, raw = refresh_execution(request, project, run_id)
+        response = Response(
+            {
+                "id": str(credential.pk),
+                "token": raw,
+                "expired_at": credential.expired_at,
+            },
+            status=201,
+        )
+        response["Cache-Control"] = "no-store"
+        return response
+
+
 class RunEndpoint(CoordinationEndpoint):
     serializer_class = RunSerializer
     coordination_action = "run"
@@ -377,6 +430,7 @@ class CandidatesEndpoint(MachineCoordinationMixin, CoordinationEndpoint):
                     status__in=["in_progress", "awaiting_input", "review"],
                     runs__status="active",
                     runs__deleted_at__isnull=True,
+                    runs__handed_off_at__isnull=True,
                     runs__lease_expires_at__lte=timezone.now(),
                 )
             )

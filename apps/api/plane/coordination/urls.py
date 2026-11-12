@@ -4,7 +4,7 @@
 
 from django.urls import path
 
-from . import views, workflow_views, review_views
+from . import views, workflow_views, review_views, notification_views
 
 
 def build_patterns(machine=False):
@@ -31,9 +31,25 @@ def build_patterns(machine=False):
     ]
     if machine:
         patterns += [
+            path(base + route, getattr(notification_views, name).as_view())
+            for route, name in [
+                ("subscriptions/", "SubscriptionsEndpoint"),
+                ("subscriptions/<uuid:subscription_id>/", "SubscriptionEndpoint"),
+                ("subscriptions/<uuid:subscription_id>/deliveries/", "DeliveriesEndpoint"),
+                (
+                    "subscriptions/<uuid:subscription_id>/deliveries/<uuid:delivery_id>/replay/",
+                    "DeliveryReplayEndpoint",
+                ),
+                ("runs/<uuid:run_id>/events/", "WorkerEventsEndpoint"),
+                ("runs/<uuid:run_id>/assets/<uuid:asset_id>/", "AssignedAssetEndpoint"),
+            ]
+        ]
+        patterns += [
             path(base + "candidates/", views.CandidatesEndpoint.as_view()),
             path(base + "work-items/<uuid:issue_id>/claim/", views.ClaimEndpoint.as_view()),
             path(base + "runs/<uuid:run_id>/credentials/", views.CredentialEndpoint.as_view()),
+            path(base + "runs/<uuid:run_id>/handoff/", views.HandoffEndpoint.as_view()),
+            path(base + "runs/<uuid:run_id>/refresh/", views.RefreshEndpoint.as_view()),
             path(base + "runs/<uuid:run_id>/renew/", views.RenewEndpoint.as_view()),
             path(base + "runs/<uuid:run_id>/heartbeat/", views.HeartbeatEndpoint.as_view()),
             path(base + "work-items/<uuid:issue_id>/questions/", workflow_views.QuestionsEndpoint.as_view()),

@@ -275,7 +275,34 @@ class Issue(ProjectBaseModel):
                 if (self.description_html == "" or self.description_html is None)
                 else strip_tags(self.description_html)
             )
-            super(Issue, self).save(*args, **kwargs)
+            with transaction.atomic():
+                fields = (
+                    "name",
+                    "description_html",
+                    "priority",
+                    "state_id",
+                    "start_date",
+                    "target_date",
+                    "parent_id",
+                    "archived_at",
+                    "deleted_at",
+                )
+                previous = Issue.all_objects.select_for_update().filter(pk=self.pk).values(*fields).first()
+                super(Issue, self).save(*args, **kwargs)
+                written = kwargs.get("update_fields")
+                changed = [
+                    field
+                    for field in fields
+                    if previous
+                    and previous[field] != getattr(self, field)
+                    and (written is None or field in written or field.removesuffix("_id") in written)
+                ]
+                if changed:
+                    from plane.coordination.changes import emit_task_change
+
+                    emit_task_change(
+                        self.pk, "task.updated", actor=self.updated_by, payload={"changed_fields": changed}
+                    )
 
     def __str__(self):
         """Return name of the issue"""
@@ -528,6 +555,12 @@ class IssueComment(ChangeTrackerMixin, ProjectBaseModel):
         }
 
         with transaction.atomic():
+            Issue.all_objects.select_for_update().get(pk=self.issue_id)
+            previous = (
+                IssueComment.all_objects.filter(pk=self.pk)
+                .values("comment_html", "comment_json", "attachments", "deleted_at")
+                .first()
+            )
             super(IssueComment, self).save(*args, **kwargs)
 
             if is_creating or not self.description_id:
@@ -555,6 +588,18 @@ class IssueComment(ChangeTrackerMixin, ProjectBaseModel):
                     Description.objects.filter(pk=self.description_id).update(
                         **changed_fields, updated_by_id=self.updated_by_id, updated_at=self.updated_at
                     )
+            kind = "comment.created" if is_creating else None
+            if not is_creating and previous:
+                if previous["deleted_at"] != self.deleted_at:
+                    kind = "comment.deleted"
+                elif any(
+                    previous[field] != getattr(self, field) for field in ("comment_html", "comment_json", "attachments")
+                ):
+                    kind = "comment.updated"
+            if kind:
+                from plane.coordination.changes import emit_task_change
+
+                emit_task_change(self.issue_id, kind, actor=self.actor, payload={"comment_id": str(self.pk)})
 
     class Meta:
         verbose_name = "Issue Comment"

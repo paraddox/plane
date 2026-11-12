@@ -11,10 +11,12 @@ from plane.db.models import APIToken, Issue, Module, ModuleIssue, ProjectMember,
 from .test_coordination_contracts import coordination as coordination
 from .test_coordination_execution import execution as execution, claim, worker_client
 from .test_coordination_github import github_http as github_http
+from .test_coordination_handoff import handoff, refresh
 
 
 @pytest.mark.django_db(transaction=True)
-def test_reviewed_delivery_through_real_auth_database_and_github_http(execution, github_http, settings):
+@pytest.mark.parametrize("handed_off", [False, True])
+def test_reviewed_delivery_through_real_auth_database_and_github_http(execution, github_http, settings, handed_off):
     _, human, project, issue, contract, policy, _, _, _, prefix = execution
     session = prefix.replace("/api/v1/", "/api/", 1)
     settings.COORDINATION_GITHUB_INSTALLATIONS = json.dumps({str(project.pk): {"example/product": 42}})
@@ -34,8 +36,15 @@ def test_reviewed_delivery_through_real_auth_database_and_github_http(execution,
         ).status_code
         == 200
     )
-    run_id = claim(execution)
-    agent, _ = worker_client(execution, run_id)
+    if handed_off:
+        assignment, run_id, _ = handoff(execution)
+        credential = refresh(execution, assignment, run_id)
+        assert credential.status_code == 201, credential.data
+        agent = APIClient()
+        agent.credentials(HTTP_X_API_KEY=credential.data["token"])
+    else:
+        run_id = claim(execution)
+        agent, _ = worker_client(execution, run_id)
     run_path = prefix + f"runs/{run_id}/"
     task_path = prefix + f"work-items/{issue.pk}/"
     modules = [Module.objects.create(project=project, name=name) for name in ("API", "Web")]
@@ -121,5 +130,7 @@ def test_reviewed_delivery_through_real_auth_database_and_github_http(execution,
     assert Issue.objects.get(pk=issue.pk).state_id == done.pk
     assert not APIToken.objects.filter(agent_run_id=run_id, is_active=True).exists()
     assert agent.get(run_path).status_code == 403
+    if handed_off:
+        assert refresh(execution, assignment, run_id).status_code == 403
     Issue.all_objects.filter(pk=issue.pk).delete()
     assert not Issue.all_objects.filter(pk__in=[issue.pk, child_id]).exists()

@@ -111,6 +111,7 @@ class RunSerializer(serializers.ModelSerializer):
             "status",
             "lease_expires_at",
             "last_heartbeat",
+            "handed_off_at",
             "finished_at",
             "head_sha",
             "code_revision",
@@ -121,14 +122,25 @@ class RunSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
-def validate_live_run(run, *, allow_expired_merging=False):
+def validate_live_run(run, *, allow_expired_merging=False, assignment=False):
     if run.project.deleted_at or run.project.archived_at or run.project.workspace.deleted_at:
         raise PermissionDenied("This project is no longer open for execution.")
+    issue = run.contract.issue
+    if issue.is_draft or issue.archived_at or (issue.state_id and issue.state.group in ("completed", "cancelled")):
+        raise PermissionDenied("This work item is no longer open for execution.")
     if run.status not in (AgentRun.Status.ACTIVE, AgentRun.Status.MERGING) or (
-        run.lease_expires_at <= timezone.now() and not (allow_expired_merging and run.status == AgentRun.Status.MERGING)
+        run.lease_expires_at <= timezone.now()
+        and not assignment
+        and not (allow_expired_merging and run.status == AgentRun.Status.MERGING)
     ):
         raise PermissionDenied("This execution is no longer authorized.")
-    if run.contract.deleted_at or run.contract.issue.deleted_at or run.contract.spec_revision != run.spec_revision:
+    if assignment and not run.handed_off_at:
+        raise PermissionDenied("This execution has not been handed off.")
+    if (
+        run.contract.deleted_at
+        or run.contract.issue.deleted_at
+        or (not assignment and run.contract.spec_revision != run.spec_revision)
+    ):
         raise PermissionDenied("The execution specification is no longer current.")
     if run.contract.status in (
         WorkItemContract.Status.DRAFT,
@@ -170,7 +182,7 @@ def lock_execution_credential(request, run):
         APIToken.objects.select_for_update()
         .filter(
             pk=request.auth.pk,
-            purpose="execution",
+            purpose=request.auth.purpose,
             agent_run=run,
             user=run.agent,
             project=run.project,
@@ -211,7 +223,7 @@ def claim_task(request, project, issue_id, data):
     existing = AgentRun.objects.select_for_update().filter(contract=contract, status__in=["active", "merging"]).first()
     if existing:
         # A possibly completed remote merge must be reconciled, never reassigned.
-        if existing.status == "merging" or existing.lease_expires_at > timezone.now():
+        if existing.handed_off_at or existing.status == "merging" or existing.lease_expires_at > timezone.now():
             raise CoordinationConflict("This task is already claimed.")
         existing.status = AgentRun.Status.EXPIRED
         existing.finished_at = timezone.now()
@@ -231,20 +243,7 @@ def claim_task(request, project, issue_id, data):
     if not repository:
         raise ValidationError({"repository": "Select a repository configured for this project."})
     previous = AgentRun.objects.filter(contract=contract).aggregate(last=Max("attempt"))["last"] or 0
-    snapshot = {
-        "issue_id": str(contract.issue_id),
-        "owner_id": str(contract.owner_id),
-        "owner_ids": [str(identifier) for identifier in task_owners(contract).values_list("id", flat=True)],
-        "name": contract.issue.name,
-        "description_html": contract.issue.description_html,
-        "requirements": contract.requirements,
-        "definition_of_done": contract.definition_of_done,
-        "release_id": str(contract.release_id) if contract.release_id else None,
-        "module_ids": [
-            str(pk) for pk in ModuleIssue.objects.filter(issue_id=issue_id).values_list("module_id", flat=True)
-        ],
-        "context_references": policy.context_references,
-    }
+    snapshot = specification_snapshot(contract, policy)
     run = AgentRun.objects.create(
         project=project,
         contract=contract,
@@ -288,6 +287,23 @@ def claim_task(request, project, issue_id, data):
     return run
 
 
+def specification_snapshot(contract, policy):
+    return {
+        "issue_id": str(contract.issue_id),
+        "owner_id": str(contract.owner_id),
+        "owner_ids": [str(identifier) for identifier in task_owners(contract).values_list("id", flat=True)],
+        "name": contract.issue.name,
+        "description_html": contract.issue.description_html,
+        "requirements": contract.requirements,
+        "definition_of_done": contract.definition_of_done,
+        "release_id": str(contract.release_id) if contract.release_id else None,
+        "module_ids": [
+            str(pk) for pk in ModuleIssue.objects.filter(issue_id=contract.issue_id).values_list("module_id", flat=True)
+        ],
+        "context_references": policy.context_references,
+    }
+
+
 @transaction.atomic
 def issue_execution_credential(request, project, run_id):
     parent = require_dispatcher(request, project)
@@ -295,24 +311,28 @@ def issue_execution_credential(request, project, run_id):
     if run.dispatcher_id != parent.pk:
         raise PermissionDenied("This run belongs to another dispatcher.")
     validate_live_run(run)
-    policy = execution_policy(project)
-    run.credentials.update(is_active=False)
+    return mint_execution_credential(request, run)
+
+
+def mint_execution_credential(request, run):
+    policy = execution_policy(run.project)
+    run.credentials.filter(purpose="execution").update(is_active=False)
     raw = generate_token()
     credential = APIToken.objects.create(
         user=run.agent,
         user_type=1,
-        workspace=project.workspace,
-        project=project,
+        workspace=run.project.workspace,
+        project=run.project,
         label=f"{run.worker_id}: {run.id}",
         purpose="execution",
         agent_run=run,
-        delegated_by=parent,
+        delegated_by=run.dispatcher,
         capabilities=WORKER_CAPABILITIES.copy(),
         token=raw,
         expired_at=min(timezone.now() + policy.credential_lifetime, run.lease_expires_at),
     )
     emit_event(
-        project,
+        run.project,
         "run.credential_issued",
         actor=request.user,
         issue=run.contract.issue,
@@ -320,6 +340,81 @@ def issue_execution_credential(request, project, run_id):
         payload={"run_id": str(run.pk), "credential_id": str(credential.pk)},
     )
     return credential, raw
+
+
+@transaction.atomic
+def handoff_execution(request, project, run_id):
+    parent = require_dispatcher(request, project)
+    run = locked_run(project, run_id)
+    if run.dispatcher_id != parent.pk:
+        raise PermissionDenied("This run belongs to another dispatcher.")
+    validate_live_run(run, assignment=bool(run.handed_off_at))
+    run.handed_off_at = run.handed_off_at or timezone.now()
+    run.save(update_fields=["handed_off_at", "updated_at"])
+    run.credentials.update(is_active=False)
+    from plane.db.models import AgentSubscription
+
+    AgentSubscription.objects.filter(run=run, is_active=True).update(is_active=False)
+    raw = generate_token()
+    credential = APIToken.objects.create(
+        user=run.agent,
+        user_type=1,
+        workspace=project.workspace,
+        project=project,
+        label=f"Assignment: {run.worker_id}",
+        purpose="assignment",
+        agent_run=run,
+        delegated_by=parent,
+        token=raw,
+    )
+    event = emit_event(
+        project,
+        "run.handed_off",
+        actor=request.user,
+        issue=run.contract.issue,
+        revision=run.contract.spec_revision,
+        payload={"run_id": str(run.pk), "agent_id": str(run.agent_id)},
+    )
+    return run, credential, raw, event.sequence
+
+
+class RefreshSerializer(serializers.Serializer):
+    expected_revision = serializers.IntegerField(min_value=1)
+
+
+@transaction.atomic
+def refresh_execution(request, project, run_id):
+    if request.auth.purpose != "assignment":
+        raise PermissionDenied("The assigned worker's assignment key is required.")
+    run = getattr(request, "_locked_coordination_run", None) or locked_run(project, run_id)
+    if run.pk != request.auth.agent_run_id:
+        raise PermissionDenied("This key belongs to another assignment.")
+    lock_execution_credential(request, run)
+    serializer = RefreshSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+    if serializer.validated_data["expected_revision"] != run.contract.spec_revision:
+        raise CoordinationConflict("Read and acknowledge the current specification before refreshing access.")
+    if run.spec_revision != run.contract.spec_revision:
+        emit_event(
+            project,
+            "run.specification_acknowledged",
+            actor=request.user,
+            issue=run.contract.issue,
+            revision=run.contract.spec_revision,
+            payload={
+                "run_id": str(run.pk),
+                "previous_revision": run.spec_revision,
+                "previous_snapshot": run.spec_snapshot,
+            },
+        )
+        run.spec_revision = run.contract.spec_revision
+        run.spec_snapshot = specification_snapshot(run.contract, execution_policy(project))
+        run.head_sha, run.pull_request, run.last_error = "", None, ""
+        run.code_revision += 1
+    run.lease_expires_at = timezone.now() + execution_policy(project).execution_lease
+    run.last_heartbeat = timezone.now()
+    run.save()
+    return mint_execution_credential(request, run)
 
 
 @transaction.atomic

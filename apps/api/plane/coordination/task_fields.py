@@ -126,4 +126,21 @@ class TaskFieldsSerializer(TaskIntentSerializer):
             contract.save(update_fields=["status", "updated_at"])
             emit_event(issue.project, "task.ready", actor=request.user, issue=issue, revision=contract.spec_revision)
         issue._state.fields_cache.pop("coordination_contract", None)
+        if contract and "state" in values and values["state"].group == "cancelled":
+            from .execution import cancel_execution
+            from .contracts import clear_advance_authorization
+            from plane.db.models import AgentRun
+
+            runs = list(AgentRun.objects.filter(contract=contract, status__in=["active", "merging"]))
+            for run in runs:
+                cancel_execution(request, issue.project, run.pk)
+            if not runs:
+                contract.status = "cancelled"
+                clear_advance_authorization(contract)
+                contract.save()
+        relation_fields = [name for name in ("assignees", "assignee_ids", "labels", "label_ids") if name in values]
+        if not creating and relation_fields:
+            from .changes import emit_task_change
+
+            emit_task_change(issue.pk, "task.updated", actor=request.user, payload={"changed_fields": relation_fields})
         return issue

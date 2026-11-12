@@ -14,6 +14,7 @@ from celery.schedules import crontab
 
 # Module imports
 from plane.settings.redis import redis_instance
+from django.conf import settings
 
 # Set the default Django settings module for the 'celery' program.
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "plane.settings.production")
@@ -27,6 +28,10 @@ app = Celery("plane")
 app.config_from_object("django.conf:settings", namespace="CELERY")
 
 app.conf.beat_schedule = {
+    "recover-agent-notification-outbox": {
+        "task": "plane.bgtasks.coordination_notification_task.dispatch_agent_events",
+        "schedule": settings.COORDINATION_WEBHOOK_RETRY_DELAY,
+    },
     # Intra day recurring jobs
     "check-every-five-minutes-to-send-email-notifications": {
         "task": "plane.bgtasks.email_notification_task.stack_email_notification",

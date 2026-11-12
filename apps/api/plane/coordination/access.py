@@ -48,6 +48,13 @@ DISPATCHER_ACTIONS = {
     ("reconcile", "POST"),
     ("claim", "POST"),
     ("credential", "POST"),
+    ("handoff", "POST"),
+    ("subscriptions", "GET"),
+    ("subscriptions", "POST"),
+    ("subscription", "GET"),
+    ("subscription", "DELETE"),
+    ("deliveries", "GET"),
+    ("delivery_replay", "POST"),
     ("renew", "POST"),
     ("run", "GET"),
     ("candidates", "GET"),
@@ -168,7 +175,7 @@ def enforce_coordination_access(request, token, *, locked_execution=None, resolv
             raise PermissionDenied("This run belongs to another dispatcher.")
         return
 
-    if token.purpose != "execution" or not token.agent_run_id or not token.delegated_by_id:
+    if token.purpose not in ("execution", "assignment") or not token.agent_run_id or not token.delegated_by_id:
         raise PermissionDenied("Invalid execution credential.")
     run = locked_execution or AgentRun.objects.select_related(
         "contract__issue", "project__workspace", "agent", "dispatcher__user"
@@ -181,12 +188,49 @@ def enforce_coordination_access(request, token, *, locked_execution=None, resolv
         raise PermissionDenied("Execution credential bindings are inconsistent.")
     token.agent_run = run
     token.delegated_by = run.dispatcher
-    validate_live_run(run)
+    validate_live_run(run, assignment=token.purpose == "assignment")
     request.coordination_run = run
     if kwargs.get("run_id") and kwargs["run_id"] != run.pk:
         raise PermissionDenied("This credential belongs to another run.")
 
+    if token.purpose == "assignment":
+        if (
+            category == "artifact_detail"
+            and not FileAsset.objects.filter(
+                pk=kwargs.get("pk"),
+                issue_id=target_id,
+                project_id=run.project_id,
+            ).exists()
+        ):
+            raise PermissionDenied("This attachment does not belong to the assigned work item.")
+        if (action, request.method) in {
+            ("refresh", "POST"),
+            ("worker_events", "GET"),
+            ("subscriptions", "GET"),
+            ("subscriptions", "POST"),
+            ("subscription", "GET"),
+            ("subscription", "DELETE"),
+            ("deliveries", "GET"),
+            ("delivery_replay", "POST"),
+            ("run", "GET"),
+            ("project_context", "GET"),
+            ("assigned_asset", "GET"),
+        }:
+            return
+        if target_id and request.method in SAFE_METHODS and (category or action in ("contract", "overview")):
+            require_targets(run, [target_id])
+            return
+        raise PermissionDenied(
+            "Assignment keys only read assigned context, receive events and refresh execution access."
+        )
+
     if action == "run" and request.method == "GET":
+        require_capability(token, "task:read")
+        return
+    if action == "worker_events" and request.method == "GET":
+        require_capability(token, "task:read")
+        return
+    if action == "assigned_asset" and request.method == "GET":
         require_capability(token, "task:read")
         return
     if action in ("heartbeat", "head", "evidence", "review_ready") and request.method == "POST":
@@ -269,7 +313,7 @@ def guard_coordination_mutation(view, request):
     token = request.auth
     if (
         not isinstance(token, APIToken)
-        or token.purpose not in ("personal", "execution")
+        or token.purpose not in ("personal", "execution", "assignment")
         or request.method in SAFE_METHODS
         or getattr(view, "coordination_action", None) in ("merge", "reconcile")
     ):
@@ -324,7 +368,11 @@ def guard_coordination_mutation(view, request):
             run = locked_run(token.project, token.agent_run_id)
             lock_execution_credential(request, run)
             request._locked_coordination_run = run
-            if run.status == "merging" and getattr(view, "coordination_action", None) != "heartbeat":
+            if (
+                token.purpose == "execution"
+                and run.status == "merging"
+                and getattr(view, "coordination_action", None) != "heartbeat"
+            ):
                 raise PermissionDenied("Reconcile the in-flight merge before making further changes.")
             return handler(request, *args, **kwargs)
 
