@@ -299,6 +299,103 @@ def test_body_selected_targets_are_rechecked_after_authentication(execution, api
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("target", ["root", "child"])
+def test_cycle_transfers_cannot_mutate_coordinated_tasks(execution, execution_child, api_key_client, target):
+    _, _, project, root, contract, _, _, _, _, _ = execution
+    _, _, child = execution_child
+    protected = root if target == "root" else child
+    Issue.objects.filter(pk=protected.pk).update(state=State.objects.get(project=project, name="Todo"))
+    ordinary = Issue.objects.create(project=project, name="Ordinary cycle member")
+    source = Cycle.objects.create(project=project, name="Source", owned_by=contract.owner)
+    destination = Cycle.objects.create(project=project, name="Destination", owned_by=contract.owner)
+    for issue in (ordinary, protected):
+        CycleIssue.objects.create(project=project, cycle=source, issue=issue)
+    url = f"/api/v1/workspaces/{project.workspace.slug}/projects/{project.pk}/cycles/{source.pk}/transfer-issues/"
+    payload = {"new_cycle_id": str(destination.pk)}
+    response = api_key_client.post(url, payload, format="json")
+    assert response.status_code == 403, response.data
+    assert CycleIssue.objects.filter(cycle=source).count() == 2
+    assert not CycleIssue.objects.filter(cycle=destination).exists()
+    source.refresh_from_db()
+    assert not source.progress_snapshot
+    settled = State.objects.create(
+        project=project,
+        name="Settled cycle member",
+        group="cancelled" if target == "root" else "completed",
+        color="#00aa00",
+    )
+    Issue.objects.filter(pk=protected.pk).update(state=settled)
+    permitted = api_key_client.post(url, payload, format="json")
+    assert permitted.status_code == 200, permitted.data
+    assert CycleIssue.objects.get(issue=ordinary).cycle_id == destination.pk
+    assert CycleIssue.objects.get(issue=protected).cycle_id == source.pk
+
+
+@pytest.mark.django_db
+def test_session_cycle_transfer_keeps_human_control_of_coordinated_tasks(execution):
+    _, human, project, root, contract, _, _, _, _, _ = execution
+    Issue.objects.filter(pk=root.pk).update(state=State.objects.get(project=project, name="Todo"))
+    source = Cycle.objects.create(project=project, name="Source", owned_by=contract.owner)
+    destination = Cycle.objects.create(project=project, name="Destination", owned_by=contract.owner)
+    CycleIssue.objects.create(project=project, cycle=source, issue=root)
+    url = f"/api/workspaces/{project.workspace.slug}/projects/{project.pk}/cycles/{source.pk}/transfer-issues/"
+    response = human.post(url, {"new_cycle_id": str(destination.pk)}, format="json")
+    assert response.status_code == 200, response.data
+    assert CycleIssue.objects.get(issue=root).cycle_id == destination.pk
+
+
+@pytest.mark.django_db
+def test_cycle_transfer_rechecks_contracts_created_after_authentication(execution, api_key_client, monkeypatch):
+    from plane.api.middleware.api_authentication import APIKeyAuthentication
+
+    _, _, project, _, contract, _, _, _, _, _ = execution
+    ordinary = Issue.objects.create(project=project, name="Newly coordinated cycle member")
+    source = Cycle.objects.create(project=project, name="Source", owned_by=contract.owner)
+    destination = Cycle.objects.create(project=project, name="Destination", owned_by=contract.owner)
+    CycleIssue.objects.create(project=project, cycle=source, issue=ordinary)
+    record_usage = APIKeyAuthentication.record_usage
+
+    def add_contract(self, token):
+        record_usage(self, token)
+        WorkItemContract.objects.create(project=project, issue=ordinary, owner=contract.owner)
+
+    monkeypatch.setattr(APIKeyAuthentication, "record_usage", add_contract)
+    url = f"/api/v1/workspaces/{project.workspace.slug}/projects/{project.pk}/cycles/{source.pk}/transfer-issues/"
+    response = api_key_client.post(url, {"new_cycle_id": str(destination.pk)}, format="json")
+    assert response.status_code == 403, response.data
+    assert CycleIssue.objects.get(issue=ordinary).cycle_id == source.pk
+    source.refresh_from_db()
+    assert not source.progress_snapshot
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("populated", [False, True])
+def test_cycle_transfer_does_not_expand_its_locked_selection(execution, api_key_client, monkeypatch, populated):
+    from plane.api.views import cycle as cycle_views
+
+    _, _, project, root, contract, _, _, _, _, _ = execution
+    Issue.objects.filter(pk=root.pk).update(state=State.objects.get(project=project, name="Todo"))
+    ordinary = Issue.objects.create(project=project, name="Initially selected member")
+    source = Cycle.objects.create(project=project, name="Source", owned_by=contract.owner)
+    destination = Cycle.objects.create(project=project, name="Destination", owned_by=contract.owner)
+    if populated:
+        CycleIssue.objects.create(project=project, cycle=source, issue=ordinary)
+    transfer = cycle_views.transfer_cycle_issues
+
+    def add_member_before_transfer(**kwargs):
+        CycleIssue.objects.create(project=project, cycle=source, issue=root)
+        return transfer(**kwargs)
+
+    monkeypatch.setattr(cycle_views, "transfer_cycle_issues", add_member_before_transfer)
+    url = f"/api/v1/workspaces/{project.workspace.slug}/projects/{project.pk}/cycles/{source.pk}/transfer-issues/"
+    response = api_key_client.post(url, {"new_cycle_id": str(destination.pk)}, format="json")
+    assert response.status_code == 200, response.data
+    assert CycleIssue.objects.get(issue=root).cycle_id == source.pk
+    if populated:
+        assert CycleIssue.objects.get(issue=ordinary).cycle_id == destination.pk
+
+
+@pytest.mark.django_db
 def test_claim_is_exclusive_and_credentials_are_separate_hashed_grants(execution):
     client, _, project, issue, contract, _, _, worker, parent, prefix = execution
     run_id = claim(execution)

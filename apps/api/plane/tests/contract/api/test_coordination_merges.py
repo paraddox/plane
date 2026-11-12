@@ -16,9 +16,11 @@ from plane.db.models import (
     Issue,
     MergeAttempt,
     ProjectMember,
+    RunChild,
     State,
     User,
     WorkItemContract,
+    WorkItemQuestion,
     WorkspaceMember,
 )
 from plane.coordination.github import MergeRejected, ProviderUnavailable
@@ -278,6 +280,78 @@ def test_failed_gates_never_call_provider_merge(merge_flow, failed_gate):
     assert agent.post(prefix + f"runs/{run_id}/merge/", MERGE_INPUT, format="json").status_code == 409
     assert not provider.merge_calls
     assert not MergeAttempt.objects.exists()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("completed", [False, True])
+def test_session_child_deletion_cannot_remove_required_merge_gates(merge_flow, monkeypatch, completed):
+    from plane.bgtasks.deletion_task import soft_delete_related_objects
+
+    execution, agent, run_id, provider, done, _, _ = merge_flow
+    _, human, project, issue, _, _, _, _, _, prefix = execution
+    monkeypatch.setattr(soft_delete_related_objects, "delay", soft_delete_related_objects.run)
+    advance(merge_flow)
+    child = agent.post(
+        prefix + f"work-items/{issue.pk}/children/",
+        {
+            "name": "Required child",
+            "requirements": "Focused implementation",
+            "definition_of_done": [{"description": "Child acceptance must pass"}],
+        },
+        format="json",
+    )
+    assert child.status_code == 201, child.data
+    if completed:
+        Issue.objects.filter(pk=child.data["issue"]).update(state=done)
+    deleted = human.delete(
+        f"/api/workspaces/{project.workspace.slug}/projects/{project.pk}/issues/{child.data['issue']}/"
+    )
+    assert deleted.status_code == 204, getattr(deleted, "data", None)
+    assert Issue.all_objects.get(pk=child.data["issue"]).deleted_at is not None
+    response = agent.post(prefix + f"runs/{run_id}/merge/", MERGE_INPUT, format="json")
+    assert response.status_code == 409, response.data
+    assert RunChild.objects.filter(pk=child.data["id"]).exists()
+    assert not provider.merge_calls and not MergeAttempt.objects.exists()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("source", ["question", "answer"])
+def test_session_comment_deletion_preserves_blocking_question_until_acknowledged(merge_flow, monkeypatch, source):
+    from plane.bgtasks.deletion_task import soft_delete_related_objects
+
+    execution, agent, run_id, provider, _, session, _ = merge_flow
+    _, human, project, issue, _, _, _, _, _, prefix = execution
+    monkeypatch.setattr(soft_delete_related_objects, "delay", soft_delete_related_objects.run)
+    advance(merge_flow)
+    question = agent.post(prefix + f"work-items/{issue.pk}/questions/", {"text": "Blocking decision"}, format="json")
+    assert question.status_code == 201, question.data
+    answer_url = session + f"work-items/{issue.pk}/questions/{question.data['id']}/answer/"
+    if source == "answer":
+        answer = human.post(answer_url, {"text": "Canonical decision"}, format="json")
+        assert answer.status_code == 200, answer.data
+        comment_id = answer.data["answer_comment"]
+    else:
+        comment_id = question.data["question_comment"]
+    deleted = human.delete(
+        f"/api/workspaces/{project.workspace.slug}/projects/{project.pk}/issues/{issue.pk}/comments/{comment_id}/"
+    )
+    assert deleted.status_code == 204, getattr(deleted, "data", None)
+    response = agent.post(prefix + f"runs/{run_id}/merge/", MERGE_INPUT, format="json")
+    assert response.status_code == 409, response.data
+    assert not provider.merge_calls and not MergeAttempt.objects.exists()
+    assert WorkItemQuestion.objects.filter(pk=question.data["id"]).exists()
+    if source == "question":
+        answer = human.post(answer_url, {"text": "Canonical decision"}, format="json")
+        assert answer.status_code == 200, answer.data
+    resolved = agent.post(
+        prefix + f"work-items/{issue.pk}/questions/{question.data['id']}/resolve/",
+        {"answer_comment": str(answer.data["answer_comment"])},
+        format="json",
+    )
+    assert resolved.status_code == 200, resolved.data
+    response = agent.post(prefix + f"runs/{run_id}/merge/", MERGE_INPUT, format="json")
+    assert response.status_code == 200, response.data
+    assert provider.merge_calls == [("main", "a" * 40)]
 
 
 @pytest.mark.django_db(transaction=True)

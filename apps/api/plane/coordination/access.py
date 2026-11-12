@@ -10,6 +10,7 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import SAFE_METHODS
 
 from plane.db.models import APIToken, AgentRun, FileAsset, Issue, RunChild, RunTarget, WorkItemContract
+from plane.utils.cycle_transfer_issues import transferable_cycle_issues
 from .execution import lock_execution_credential, locked_run, require_agent_access, validate_live_run
 
 
@@ -96,6 +97,15 @@ def personal_write_targets(request, *, resolved_issue_id=None):
         )
     if view_name in ("ModuleIssueListCreateAPIEndpoint", "CycleIssueListCreateAPIEndpoint"):
         return parsed_ids(request.data.get("issues", []))
+    if view_name == "TransferCycleIssueAPIEndpoint":
+        selected = getattr(request, "_coordination_transfer_issue_ids", None)
+        if selected is not None:
+            return selected
+        return list(
+            transferable_cycle_issues(kwargs.get("slug"), kwargs.get("project_id"), kwargs.get("cycle_id")).values_list(
+                "issue_id", flat=True
+            )
+        )
     if view_name == "IssueRelationListCreateAPIEndpoint":
         return ([target_id] if target_id else []) + parsed_ids(request.data.get("issues", []))
     if (
@@ -248,7 +258,8 @@ def guard_coordination_mutation(view, request):
     handler = getattr(view, request.method.lower(), None)
     if handler is None:
         return
-    if token.purpose == "personal" and not personal_write_targets(request):
+    cycle_transfer = view.__class__.__name__ == "TransferCycleIssueAPIEndpoint"
+    if token.purpose == "personal" and not cycle_transfer and not personal_write_targets(request):
         return
 
     @wraps(handler)
@@ -258,8 +269,8 @@ def guard_coordination_mutation(view, request):
                 scope = (request.parser_context or {}).get("kwargs", {})
                 # Contract creation takes the same issue lock. Recheck after
                 # acquiring all targets, in the same order used by bulk writes.
-                list(
-                    Issue.objects.select_for_update(of=("self",))
+                targets = list(
+                    Issue.all_objects.select_for_update(of=("self",))
                     .filter(
                         pk__in=personal_write_targets(request),
                         project_id=scope.get("project_id"),
@@ -268,6 +279,10 @@ def guard_coordination_mutation(view, request):
                     .order_by("id")
                     .values_list("id", flat=True)
                 )
+                if cycle_transfer:
+                    # Implicit selections must not expand after authorization,
+                    # including when the source cycle was initially empty.
+                    request._coordination_transfer_issue_ids = targets
                 enforce_coordination_access(request, token)
                 return handler(request, *args, **kwargs)
             run = locked_run(token.project, token.agent_run_id)

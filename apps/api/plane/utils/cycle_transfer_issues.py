@@ -32,6 +32,17 @@ from plane.bgtasks.issue_activities_task import issue_activity
 from plane.utils.host import base_host
 
 
+def transferable_cycle_issues(slug, project_id, cycle_id):
+    return CycleIssue.objects.filter(
+        cycle_id=cycle_id,
+        project_id=project_id,
+        workspace__slug=slug,
+        issue__archived_at__isnull=True,
+        issue__is_draft=False,
+        issue__state__group__in=["backlog", "unstarted", "started"],
+    )
+
+
 def transfer_cycle_issues(
     slug,
     project_id,
@@ -39,6 +50,8 @@ def transfer_cycle_issues(
     new_cycle_id,
     request,
     user_id,
+    *,
+    issue_ids=None,
 ):
     """
     Transfer incomplete issues from one cycle to another and create progress snapshot.
@@ -50,6 +63,7 @@ def transfer_cycle_issues(
         new_cycle_id: Destination cycle ID
         request: HTTP request object
         user_id: User ID performing the transfer
+        issue_ids: Authorized selection, or None for the normal session workflow
 
     Returns:
         dict: Response data with success or error message
@@ -432,14 +446,9 @@ def transfer_cycle_issues(
     current_cycle.save(update_fields=["progress_snapshot"])
 
     # Get issues to transfer (only incomplete issues)
-    cycle_issues = CycleIssue.objects.filter(
-        cycle_id=cycle_id,
-        project_id=project_id,
-        workspace__slug=slug,
-        issue__archived_at__isnull=True,
-        issue__is_draft=False,
-        issue__state__group__in=["backlog", "unstarted", "started"],
-    )
+    cycle_issues = transferable_cycle_issues(slug, project_id, cycle_id)
+    if issue_ids is not None:
+        cycle_issues = cycle_issues.filter(issue_id__in=issue_ids)
 
     updated_cycles = []
     update_cycle_issue_activity = []

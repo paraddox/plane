@@ -1221,6 +1221,7 @@ class TransferCycleIssueAPIEndpoint(BaseAPIView):
             new_cycle_id=new_cycle_id,
             request=request,
             user_id=self.request.user.id,
+            issue_ids=getattr(request, "_coordination_transfer_issue_ids", None),
         )
 
         # Handle the result

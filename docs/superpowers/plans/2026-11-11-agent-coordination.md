@@ -170,7 +170,7 @@ creation surfaces, project settings/releases, shared services/types, docs.
 
 ## Final Evidence
 
-- 397 backend API/authentication/security/coordination tests passed with actual
+- 407 backend API/authentication/security/coordination tests passed with actual
   PostgreSQL migrations and Valkey, including the real-HTTP GitHub fixture and
   concurrent claim/credential/revocation checks. Schema validation is included.
 - Main migration 0122 upgraded through 0130 with existing tasks and hashed keys
@@ -290,6 +290,30 @@ with desktop/mobile screenshots inspected and no unexpected page errors beyond
 10 known app-shell hydration warnings. Web type checking, 2 frontend helper
 tests, scoped Ruff/OxLint/format checks, and diff checks passed. No model or
 migration changes were needed.
+
+### Canonical Gates and Cycle Transfers
+
+A fresh independent read-only review found two further issues. Both were
+reproduced through actual API requests before their fixes:
+
+- The soft-deletion worker no longer treats `RESTRICT` relationships as
+  cascades. Deleting a required child or a question/answer comment retains the
+  canonical coordination record, so unfinished children and unacknowledged
+  blocking questions cannot disappear from merge gates. Human answers and
+  exact-answer acknowledgement still work after ordinary comment deletion.
+- Personal-key cycle transfers resolve the same incomplete task selection used
+  by the transfer utility, lock and recheck it, and pass that frozen selection
+  into the mutation. Later arrivals cannot expand the authorized set, including
+  when the source was initially empty. Denials leave memberships and progress
+  snapshots unchanged. Normal session transfers and ordinary personal-key
+  transfers remain available; completed/cancelled members stay in the source.
+
+Nine regression cases failed against the prior code and passed after the fixes.
+An additional session-transfer compatibility case passed. The full relevant
+API/auth/security suite passed 407 tests with actual PostgreSQL migrations and
+Valkey; scoped Ruff lint/format and diff checks passed. No frontend, model, or
+migration changes were needed. Existing browser/build evidence and live-provider
+validation limits are unchanged.
 
 ## Execution Notes
 
