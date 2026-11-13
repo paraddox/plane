@@ -37,7 +37,6 @@ class FakeGitHub:
         self.repository = "example/product"
         self.merged = False
         self.merge_calls = []
-        self.check_results = {"tests": [True]}
         self.failure = None
         self.merged_branch = None
         self.merged_head = None
@@ -54,9 +53,6 @@ class FakeGitHub:
             "draft": False,
             "mergeable": True,
         }
-
-    def checks(self, sha):
-        return self.check_results
 
     def target_status(self, base, sha):
         merged = self.merged and sha == (self.merged_head or self.head_sha) and base == (self.merged_branch or "main")
@@ -83,8 +79,6 @@ class FakeGitHub:
 def merge_flow(execution, monkeypatch):
     _, human, project, issue, contract, policy, _, _, _, prefix = execution
     done = State.objects.create(project=project, name="Done", group="completed", color="#00aa00")
-    policy.required_checks = ["tests"]
-    policy.save()
     run_id = claim(execution)
     agent, credential = worker_client(execution, run_id)
     provider = FakeGitHub()
@@ -115,6 +109,19 @@ def advance(flow):
     response = human.put(
         session + f"work-items/{issue.pk}/auto-merge/", {"enabled": True, "expected_revision": 1}, format="json"
     )
+    assert response.status_code == 200, response.data
+
+
+@pytest.mark.django_db(transaction=True)
+def test_merge_does_not_fetch_project_ci_checks(merge_flow, monkeypatch):
+    execution, agent, run_id, provider, _, _, _ = merge_flow
+    advance(merge_flow)
+
+    def read_checks(sha):
+        pytest.fail("Repository CI is not configured or polled by Plane project settings.")
+
+    monkeypatch.setattr(provider, "checks", read_checks, raising=False)
+    response = agent.post(execution[-1] + f"runs/{run_id}/merge/", MERGE_INPUT, format="json")
     assert response.status_code == 200, response.data
 
 
@@ -229,18 +236,14 @@ def test_code_changes_require_fresh_approval_and_fresh_evidence(merge_flow):
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize(
-    "failed_gate", ["no_approval", "ci", "missing_ci", "remote_head", "remote_base", "question", "child", "failed_test"]
+    "failed_gate", ["no_approval", "remote_head", "remote_base", "question", "child", "failed_test"]
 )
 def test_failed_gates_never_call_provider_merge(merge_flow, failed_gate):
     execution, agent, run_id, provider, _, _, _ = merge_flow
     _, _, _, issue, contract, _, _, _, _, prefix = execution
     if failed_gate != "no_approval":
         advance(merge_flow)
-    if failed_gate == "ci":
-        provider.check_results = {"tests": [False]}
-    elif failed_gate == "missing_ci":
-        provider.check_results = {}
-    elif failed_gate == "remote_head":
+    if failed_gate == "remote_head":
         provider.head_sha = "b" * 40
     elif failed_gate == "remote_base":
         provider.base_branch = "elsewhere"

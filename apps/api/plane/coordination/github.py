@@ -28,8 +28,6 @@ class MergeRejected(CoordinationConflict):
 class GitHubClient:
     api_url = "https://api.github.com"
     api_version = "2026-03-10"
-    # GitHub's documented maximum REST page size, not a local result cap.
-    page_size = 100
 
     def __init__(self, project_id, repository):
         self.repository = repository
@@ -57,7 +55,7 @@ class GitHubClient:
             token=app_jwt,
             body={
                 "repositories": [repository.split("/", 1)[1]],
-                "permissions": {"contents": "write", "pull_requests": "read", "checks": "read", "statuses": "read"},
+                "permissions": {"contents": "write", "pull_requests": "read"},
             },
         )
         self.token = result.get("token")
@@ -118,33 +116,6 @@ class GitHubClient:
             return result
         except (KeyError, TypeError, ValueError):
             raise ProviderUnavailable("GitHub returned incomplete pull request metadata.") from None
-
-    def checks(self, sha):
-        results = {}
-        for suffix, field in (("check-runs", "check_runs"), ("status", "statuses")):
-            page = 1
-            while True:
-                params = {"per_page": self.page_size, "page": page}
-                if suffix == "check-runs":
-                    params["filter"] = "latest"
-                body = self._request("GET", f"/repos/{self.repository}/commits/{sha}/{suffix}", params=params)
-                values = body.get(field)
-                if not isinstance(values, list):
-                    raise ProviderUnavailable("GitHub returned incomplete CI metadata.")
-                try:
-                    for item in values:
-                        if suffix == "check-runs":
-                            passed = item["status"] == "completed" and item["conclusion"] == "success"
-                            results.setdefault(item["name"], []).append(passed)
-                        else:
-                            # Combined-status results contain the latest state per context.
-                            results.setdefault(item["context"], []).append(item["state"] == "success")
-                except (KeyError, TypeError):
-                    raise ProviderUnavailable("GitHub returned incomplete CI metadata.") from None
-                if len(values) < self.page_size:
-                    break
-                page += 1
-        return results
 
     def target_status(self, base_branch, head_sha):
         value = self._request("GET", f"/repos/{self.repository}/branches/{quote(base_branch, safe='')}")

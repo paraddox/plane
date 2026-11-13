@@ -13,11 +13,12 @@ the callback protocol, replay and runtime-independent integration example.
 ## Project Setup
 
 1. Apply the database migrations, including PostgreSQL completion guards.
-2. In project settings, open **Agent coordination** and enable execution. Optional
-   required CI check names apply to the project; context URLs and releases are
-   project-local too. Repository access and target branches are configured in the
-   external agent infrastructure, not this page. The dispatcher supplies the
-   repository and target branch when claiming a task.
+2. In project settings, open **Agent coordination** and enable execution. Repository
+   access and target branches are configured in the external agent infrastructure,
+   not this page. The dispatcher supplies the repository and target branch when
+   claiming a task. CI instructions and supporting context belong in the repository
+   or work-item attachments, not project execution settings. Releases remain
+   project-local.
 3. In **Agent coordination → Registered Agents**, enter a main agent name and
    select **Create main agent**. A human project administrator gets a new
    project-scoped bot identity and its API key in a one-time dialog. The key is
@@ -55,8 +56,8 @@ the callback protocol, replay and runtime-independent integration example.
    ```
 
    Installation bindings are project-specific and operator-controlled. The App
-   needs repository Contents write and Pull requests, Checks, and Commit statuses
-   read permissions. Each operation obtains a repository-limited installation
+   needs repository Contents write and Pull requests read permissions.
+   Each operation obtains a repository-limited installation
    token. Do not configure the App as a branch-protection bypass actor. GitHub's
    required checks/reviews/rules still apply; Plane approval does not impersonate
    a native GitHub reviewer. Validate your repository rules with the installation
@@ -280,8 +281,8 @@ download path is reused by the human UI.
 
 The latest test report for every required criterion must be passing for the
 current head. Reporting a new head does not certify tests; report new evidence.
-The server fetches required GitHub checks independently rather than trusting an
-agent's assertion that CI passed.
+Repository CI is managed outside Plane. Plane does not maintain a project check
+list or poll CI results; repository-side rules still apply to the merge operation.
 
 Merge input must name the exact current intent:
 
@@ -291,7 +292,7 @@ Merge input must name the exact current intent:
 
 The server checks ownership/delegation, spec/code versions, human authorization,
 required reviews, questions, children, evidence, the claimed repository/base, PR
-metadata, and current required CI checks. It persists a merge fence before the
+metadata. It persists a merge fence before the
 remote write. The provider operation names the configured base branch and exact
 head SHA; a PR retargeting race cannot redirect it to a different branch.
 
