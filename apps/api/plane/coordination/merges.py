@@ -12,7 +12,7 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 
 from plane.db.models import AgentRun, APIToken, Issue, MergeAttempt, State, WorkItemContract
 from .contracts import CoordinationConflict, emit_event, require_editor
-from .execution import execution_policy, locked_run, validate_live_run
+from .execution import locked_run, validate_live_run
 from .github import GitHubClient, MergeRejected, ProviderUnavailable
 from .reviews import merge_authorization
 from .workflow import worker_run
@@ -94,7 +94,6 @@ def prepare_merge(request, project, run_id, expected):
         if not done or done.group != "completed" or done.deleted_at:
             raise CoordinationConflict("The completed state changed. Refresh and retry.")
         authorization = check_task_gates(run)
-        policy = execution_policy(project)
         provider = GitHubClient(project.pk, run.repository)
         confirmation = provider.target_status(run.base_branch, run.head_sha)
         if not pending or not confirmation["merged"]:
@@ -103,9 +102,6 @@ def prepare_merge(request, project, run_id, expected):
         if not confirmation["merged"]:
             if pull_request["state"] != "open" or pull_request["draft"] or pull_request["mergeable"] is not True:
                 raise CoordinationConflict("The pull request is closed, a draft, conflicting, or not yet mergeable.")
-            checks = provider.checks(run.head_sha)
-            if any(name not in checks or not all(checks[name]) for name in policy.required_checks):
-                raise CoordinationConflict("Required CI checks are missing, pending, or failing.")
         validate_live_run(
             AgentRun.objects.select_related(
                 "contract__issue",

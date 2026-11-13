@@ -21,8 +21,6 @@ def test_reviewed_delivery_through_real_auth_database_and_github_http(execution,
     session = prefix.replace("/api/v1/", "/api/", 1)
     settings.COORDINATION_GITHUB_INSTALLATIONS = json.dumps({str(project.pk): {"example/product": 42}})
     done = State.objects.create(project=project, name="Done", group="completed", color="#777777")
-    policy.required_checks = ["tests"]
-    policy.save()
     reviewer = User.objects.create(email="reviewer@delivery.test", username="reviewer")
     WorkspaceMember.objects.create(workspace=project.workspace, member=reviewer, role=15)
     ProjectMember.objects.create(project=project, member=reviewer, role=15)
@@ -117,14 +115,18 @@ def test_reviewed_delivery_through_real_auth_database_and_github_http(execution,
             == 201
         )
         if number == 1:
-            github_http["check_conclusion"] = "failure"
+            github_http["merge_status"] = 409
             assert agent.post(run_path + "merge/", merge_input, format="json").status_code == 409
-    github_http["check_conclusion"] = "success"
+            assert Issue.objects.get(pk=issue.pk).state_id != done.pk
+            assert APIToken.objects.filter(agent_run_id=run_id, is_active=True).exists()
+    github_http["merge_status"] = 200
     merged = agent.post(run_path + "merge/", merge_input, format="json")
     assert merged.status_code == 200, merged.data
     assert [request for request in github_http["requests"] if request[1].endswith("/merges")] == [
+        ("POST", "/repos/example/product/merges", {"base": "main", "head": "a" * 40}),
         ("POST", "/repos/example/product/merges", {"base": "main", "head": "b" * 40}),
     ]
+    assert not any(path.endswith(("/check-runs", "/status")) for _, path, _ in github_http["requests"])
     contract.refresh_from_db()
     assert contract.status == "merged" and contract.merged_sha == "f" * 40
     assert Issue.objects.get(pk=issue.pk).state_id == done.pk

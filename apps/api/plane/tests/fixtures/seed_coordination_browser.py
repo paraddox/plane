@@ -93,7 +93,6 @@ def seed():
         project=second_project,
         defaults={
             "enabled": True,
-            "required_checks": [],
         },
     )
     for name, group in (("Todo", "unstarted"), ("In Progress", "started"), ("Done", "completed")):
