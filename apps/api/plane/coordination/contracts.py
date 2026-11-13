@@ -37,7 +37,9 @@ def authorized_project(request, slug, project_id, *, write=False):
     project = get_object_or_404(
         Project, pk=project_id, workspace__slug=slug, workspace__deleted_at__isnull=True, archived_at__isnull=True
     )
-    membership = ProjectMember.objects.filter(project=project, member=request.user, is_active=True)
+    membership = ProjectMember.objects.filter(
+        project=project, member=request.user, is_active=True, member__is_active=True
+    )
     if write:
         membership = membership.filter(role__gte=15)
     if (

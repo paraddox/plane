@@ -695,6 +695,57 @@ def test_reconnect_does_not_overwrite_a_concurrent_turn_completion(runtime_case)
 
 
 @pytest.mark.django_db(transaction=True)
+def test_reconnect_restores_final_reply_when_completion_arrived_without_final_item(runtime_case):
+    from plane.coordination.codex.chat import assistant_message, ensure_conversation
+    from plane.db.models.codex import AgentChatMessage
+
+    runtime, _, chat, issue = runtime_case
+    conversation = ensure_conversation(issue)
+    conversation.chat = chat
+    conversation.save()
+    assistant_message(chat, "finishing", "reply", "Partial", final=False)
+    final_turn = {
+        "id": "finishing",
+        "status": "completed",
+        "items": [{"type": "agentMessage", "id": "reply", "text": "The complete reply recovered from Codex"}],
+    }
+
+    async def history(thread_id):
+        if thread_id == chat.thread_id:
+            await runtime.notification(
+                "local",
+                {
+                    "method": "turn/completed",
+                    "params": {"threadId": chat.thread_id, "turn": {"id": "finishing", "status": "completed"}},
+                },
+            )
+            yield final_turn
+
+    runtime.clients["local"].history = history
+    runtime.clients["local"].request.return_value = {"thread": {"status": {"type": "idle"}}}
+    asyncio.run(runtime.reconnect("local"))
+    message = AgentChatMessage.objects.get(conversation=conversation)
+    assert message.state == "completed" and message.body == final_turn["items"][0]["text"]
+    conversation.refresh_from_db()
+    revision = conversation.revision
+    asyncio.run(runtime.reconcile_turn(chat, final_turn))
+    asyncio.run(
+        runtime.reconcile_turn(
+            chat,
+            {
+                "id": "finishing",
+                "status": "inProgress",
+                "items": [{"type": "agentMessage", "id": "reply", "text": "Partial"}],
+            },
+        )
+    )
+    conversation.refresh_from_db()
+    assert conversation.revision == revision
+    assert AgentChatMessage.objects.get(conversation=conversation).body == message.body
+    assert all(call.args[0] != "turn/start" for call in runtime.clients["local"].request.await_args_list)
+
+
+@pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize("final_status", ["completed", "failed"])
 def test_stale_reconnect_history_does_not_regress_finished_chat_delivery(runtime_case, final_status):
     from plane.coordination.codex.chat import ensure_conversation, post_message

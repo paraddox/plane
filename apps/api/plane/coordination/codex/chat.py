@@ -120,8 +120,10 @@ def assistant_message(thread, turn_id, item_id, text, *, final, replace=False, s
         return
     message = AgentChatMessage.objects.filter(thread=thread, item_id=item_id).first()
     incoming_state = state or ("completed" if final else "streaming")
+    # Turn completion can precede recovery of a missed final item.
     if message and (
-        message.state == "completed" or (message.state in ("failed", "interrupted") and incoming_state == "streaming")
+        (message.state == "completed" and (incoming_state != "completed" or message.body == text))
+        or (message.state in ("failed", "interrupted") and incoming_state == "streaming")
     ):
         return
     conversation.revision += 1

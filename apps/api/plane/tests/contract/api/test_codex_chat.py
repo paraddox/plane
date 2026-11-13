@@ -190,3 +190,54 @@ def test_stream_reuses_one_notification_iterator_for_successive_updates(coordina
 
     assert len(asyncio.run(consume())) == 3
     assert listener.calls == 1
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("revoked", ["user", "project_membership", "workspace_membership"])
+def test_open_conversation_stream_stops_after_access_is_revoked(coordination, monkeypatch, revoked):
+    import asyncio
+    from asgiref.sync import sync_to_async
+    from rest_framework.exceptions import PermissionDenied
+    from plane.coordination.codex import views
+    from plane.db.models import ProjectMember, User, WorkspaceMember
+
+    client, project, issue, prefix = coordination
+
+    class Listener:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def execute(self, query):
+            assert query.startswith("LISTEN")
+
+        async def notifies(self):
+            yield object()
+
+    async def connect(**kwargs):
+        return Listener()
+
+    monkeypatch.setattr(views.psycopg.AsyncConnection, "connect", connect)
+    response = client.get(prefix + f"work-items/{issue.pk}/conversation/stream/", HTTP_ACCEPT="text/event-stream")
+    assert response.status_code == 200
+    targets = {
+        "user": User.objects.filter(pk=issue.created_by_id),
+        "project_membership": ProjectMember.objects.filter(project=project, member_id=issue.created_by_id),
+        "workspace_membership": WorkspaceMember.objects.filter(
+            workspace=project.workspace, member_id=issue.created_by_id
+        ),
+    }
+
+    async def consume():
+        stream = response.streaming_content
+        try:
+            assert (await anext(stream)).startswith(b"data: ")
+            await sync_to_async(targets[revoked].update)(is_active=False)
+            with pytest.raises(PermissionDenied):
+                await anext(stream)
+        finally:
+            await stream.aclose()
+
+    asyncio.run(consume())
