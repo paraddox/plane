@@ -55,7 +55,6 @@ DISPATCHER_ACTIONS = {
     ("subscription", "DELETE"),
     ("deliveries", "GET"),
     ("delivery_replay", "POST"),
-    ("renew", "POST"),
     ("run", "GET"),
     ("candidates", "GET"),
     ("events", "GET"),

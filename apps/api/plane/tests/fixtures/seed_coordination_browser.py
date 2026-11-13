@@ -7,7 +7,6 @@ def seed():
     import json
     import os
     import secrets
-    from datetime import timedelta
     from pathlib import Path
     from tempfile import gettempdir
 
@@ -94,9 +93,7 @@ def seed():
         project=second_project,
         defaults={
             "enabled": True,
-            "repositories": [{"repository": "example/second", "base_branch": "develop", "required_checks": []}],
-            "credential_lifetime": timedelta(minutes=10),
-            "execution_lease": timedelta(minutes=20),
+            "required_checks": [],
         },
     )
     for name, group in (("Todo", "unstarted"), ("In Progress", "started"), ("Done", "completed")):

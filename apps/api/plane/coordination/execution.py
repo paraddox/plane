@@ -7,7 +7,7 @@ from django.db.models import Max, Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import serializers
-from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.exceptions import PermissionDenied
 
 from plane.db.models import (
     AgentProjectAccess,
@@ -82,17 +82,14 @@ def execution_policy(project):
     policy = ProjectExecutionPolicy.objects.filter(project=project, enabled=True).first()
     if not policy:
         raise PermissionDenied("Agent execution is disabled for this project.")
-    if not policy.execution_lease or not policy.credential_lifetime:
-        raise ValidationError("Configure the execution lease and credential lifetime before starting work.")
-    if policy.execution_lease.total_seconds() <= 0 or policy.credential_lifetime.total_seconds() <= 0:
-        raise ValidationError("Execution lease and credential lifetime must be positive.")
     return policy
 
 
 class ClaimSerializer(serializers.Serializer):
     agent = serializers.PrimaryKeyRelatedField(queryset=User.objects.filter(is_bot=True, is_active=True))
     worker_id = serializers.CharField(max_length=255)
-    repository = serializers.CharField(required=False)
+    repository = serializers.RegexField(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", max_length=255)
+    base_branch = serializers.CharField(max_length=255)
 
 
 class RunSerializer(serializers.ModelSerializer):
@@ -109,7 +106,6 @@ class RunSerializer(serializers.ModelSerializer):
             "repository",
             "base_branch",
             "status",
-            "lease_expires_at",
             "last_heartbeat",
             "handed_off_at",
             "finished_at",
@@ -122,17 +118,13 @@ class RunSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
-def validate_live_run(run, *, allow_expired_merging=False, assignment=False):
+def validate_live_run(run, *, assignment=False):
     if run.project.deleted_at or run.project.archived_at or run.project.workspace.deleted_at:
         raise PermissionDenied("This project is no longer open for execution.")
     issue = run.contract.issue
     if issue.is_draft or issue.archived_at or (issue.state_id and issue.state.group in ("completed", "cancelled")):
         raise PermissionDenied("This work item is no longer open for execution.")
-    if run.status not in (AgentRun.Status.ACTIVE, AgentRun.Status.MERGING) or (
-        run.lease_expires_at <= timezone.now()
-        and not assignment
-        and not (allow_expired_merging and run.status == AgentRun.Status.MERGING)
-    ):
+    if run.status not in (AgentRun.Status.ACTIVE, AgentRun.Status.MERGING):
         raise PermissionDenied("This execution is no longer authorized.")
     if assignment and not run.handed_off_at:
         raise PermissionDenied("This execution has not been handed off.")
@@ -222,13 +214,7 @@ def claim_task(request, project, issue_id, data):
         raise PermissionDenied("This task has no active human owner.")
     existing = AgentRun.objects.select_for_update().filter(contract=contract, status__in=["active", "merging"]).first()
     if existing:
-        # A possibly completed remote merge must be reconciled, never reassigned.
-        if existing.handed_off_at or existing.status == "merging" or existing.lease_expires_at > timezone.now():
-            raise CoordinationConflict("This task is already claimed.")
-        existing.status = AgentRun.Status.EXPIRED
-        existing.finished_at = timezone.now()
-        existing.save(update_fields=["status", "finished_at", "updated_at"])
-        existing.credentials.update(is_active=False)
+        raise CoordinationConflict("This task is already claimed.")
     if contract.status not in (
         WorkItemContract.Status.READY,
         WorkItemContract.Status.IN_PROGRESS,
@@ -236,12 +222,6 @@ def claim_task(request, project, issue_id, data):
         WorkItemContract.Status.REVIEW,
     ):
         raise CoordinationConflict("This task is not ready for execution.")
-    selected = serializer.validated_data.get("repository")
-    if not selected and len(policy.repositories) == 1:
-        selected = policy.repositories[0]["repository"]
-    repository = next((entry for entry in policy.repositories if entry["repository"] == selected), None)
-    if not repository:
-        raise ValidationError({"repository": "Select a repository configured for this project."})
     previous = AgentRun.objects.filter(contract=contract).aggregate(last=Max("attempt"))["last"] or 0
     snapshot = specification_snapshot(contract, policy)
     run = AgentRun.objects.create(
@@ -253,9 +233,8 @@ def claim_task(request, project, issue_id, data):
         attempt=previous + 1,
         spec_revision=contract.spec_revision,
         spec_snapshot=snapshot,
-        repository=selected,
-        base_branch=repository["base_branch"],
-        lease_expires_at=timezone.now() + policy.execution_lease,
+        repository=serializer.validated_data["repository"],
+        base_branch=serializer.validated_data["base_branch"],
     )
     RunTarget.objects.create(run=run, issue_id=issue_id)
     RunTarget.objects.bulk_create(
@@ -315,7 +294,6 @@ def issue_execution_credential(request, project, run_id):
 
 
 def mint_execution_credential(request, run):
-    policy = execution_policy(run.project)
     run.credentials.filter(purpose="execution").update(is_active=False)
     raw = generate_token()
     credential = APIToken.objects.create(
@@ -329,7 +307,6 @@ def mint_execution_credential(request, run):
         delegated_by=run.dispatcher,
         capabilities=WORKER_CAPABILITIES.copy(),
         token=raw,
-        expired_at=min(timezone.now() + policy.credential_lifetime, run.lease_expires_at),
     )
     emit_event(
         run.project,
@@ -411,24 +388,9 @@ def refresh_execution(request, project, run_id):
         run.spec_snapshot = specification_snapshot(run.contract, execution_policy(project))
         run.head_sha, run.pull_request, run.last_error = "", None, ""
         run.code_revision += 1
-    run.lease_expires_at = timezone.now() + execution_policy(project).execution_lease
     run.last_heartbeat = timezone.now()
     run.save()
     return mint_execution_credential(request, run)
-
-
-@transaction.atomic
-def renew_execution(request, project, run_id):
-    parent = require_dispatcher(request, project)
-    run = locked_run(project, run_id)
-    if run.dispatcher_id != parent.pk:
-        raise PermissionDenied("This run belongs to another dispatcher.")
-    # Pending merges cannot be reassigned; their dispatcher can restore the same
-    # agent's lease without reviving an expired, reclaimable active execution.
-    validate_live_run(run, allow_expired_merging=True)
-    run.lease_expires_at = timezone.now() + execution_policy(project).execution_lease
-    run.save(update_fields=["lease_expires_at", "updated_at"])
-    return run
 
 
 @transaction.atomic

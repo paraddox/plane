@@ -8,6 +8,9 @@ import { isAxiosError } from "axios";
 import { API_BASE_URL } from "@plane/constants";
 import type {
   TAgentRun,
+  TAgentCredential,
+  TAgentCredentialSecret,
+  TMainAgentRegistration,
   TContractInput,
   TCoordinationAgent,
   TCoordinationOverview,
@@ -141,5 +144,22 @@ export class CoordinationService extends APIService {
   }
   async agents(workspace: string, project: string): Promise<TCoordinationAgent[]> {
     return (await this.get(this.path(workspace, project) + "agents/")).data;
+  }
+  async createMainAgent(workspace: string, project: string, name: string): Promise<TMainAgentRegistration> {
+    return (await this.post(this.path(workspace, project) + "agents/", { name })).data;
+  }
+  async agentCredentials(workspace: string, project: string, accessId: string): Promise<TAgentCredential[]> {
+    return (await this.get(this.path(workspace, project) + `agents/${accessId}/credentials/`)).data;
+  }
+  async createAgentCredential(workspace: string, project: string, accessId: string): Promise<TAgentCredentialSecret> {
+    return (await this.post(this.path(workspace, project) + `agents/${accessId}/credentials/`, {})).data;
+  }
+  async revokeAgentCredential(
+    workspace: string,
+    project: string,
+    accessId: string,
+    credentialId: string
+  ): Promise<void> {
+    await this.delete(this.path(workspace, project) + `agents/${accessId}/credentials/${credentialId}/`);
   }
 }

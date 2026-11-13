@@ -28,16 +28,17 @@ def refresh(execution, worker, run_id, revision=1):
 
 
 @pytest.mark.django_db
-def test_handed_off_worker_refreshes_after_idle_without_dispatcher(execution):
+def test_handed_off_worker_refreshes_after_idle_without_dispatcher(execution, monkeypatch):
     worker, run_id, grant = handoff(execution)
-    AgentRun.objects.filter(pk=run_id).update(lease_expires_at=timezone.now() - timedelta(seconds=1))
+    later = timezone.now() + timedelta(days=1)
+    monkeypatch.setattr(timezone, "now", lambda: later)
     response = refresh(execution, worker, run_id)
     assert response.status_code == 201, response.data
     assert response["Cache-Control"] == "no-store"
     assert APIToken.objects.get(pk=grant.data["id"]).purpose == "assignment"
     token = APIToken.objects.get(pk=response.data["id"])
     assert token.purpose == "execution" and str(token.agent_run_id) == str(run_id)
-    assert token.expired_at <= AgentRun.objects.get(pk=run_id).lease_expires_at
+    assert token.expired_at is None
     assert execution[0].get(execution[-1] + "candidates/").data["results"] == []
 
 

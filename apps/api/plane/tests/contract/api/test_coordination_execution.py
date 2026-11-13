@@ -42,9 +42,6 @@ def execution(coordination, create_user):
     policy = ProjectExecutionPolicy.objects.create(
         project=project,
         enabled=True,
-        repositories=[{"repository": "example/product", "base_branch": "main", "required_checks": []}],
-        credential_lifetime=timedelta(minutes=5),
-        execution_lease=timedelta(minutes=10),
     )
     owner, _ = WorkItemContract.objects.update_or_create(
         issue=issue,
@@ -83,7 +80,12 @@ def claim(execution):
     client, _, _, issue, _, _, _, worker, _, prefix = execution
     response = client.post(
         prefix + f"work-items/{issue.pk}/claim/",
-        {"agent": str(worker.pk), "worker_id": "worker-instance", "repository": "example/product"},
+        {
+            "agent": str(worker.pk),
+            "worker_id": "worker-instance",
+            "repository": "example/product",
+            "base_branch": "main",
+        },
         format="json",
     )
     assert response.status_code == 201, response.data
@@ -601,7 +603,9 @@ def test_claim_is_exclusive_and_credentials_are_separate_hashed_grants(execution
     run_id = claim(execution)
     assert (
         client.post(
-            prefix + f"work-items/{issue.pk}/claim/", {"agent": str(worker.pk), "worker_id": "second"}, format="json"
+            prefix + f"work-items/{issue.pk}/claim/",
+            {"agent": str(worker.pk), "worker_id": "second", "repository": "example/product", "base_branch": "main"},
+            format="json",
         ).status_code
         == 409
     )
@@ -685,7 +689,7 @@ def test_attachment_downloads_are_bound_to_the_granted_issue(execution, monkeypa
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("revocation", ["parent", "cancel", "expired", "spec", "policy", "identity"])
+@pytest.mark.parametrize("revocation", ["parent", "cancel", "spec", "policy", "identity"])
 def test_execution_grants_fail_closed_after_revocation(execution, revocation):
     dispatcher, human, project, issue, contract, policy, _, worker, parent, prefix = execution
     run_id = claim(execution)
@@ -694,8 +698,6 @@ def test_execution_grants_fail_closed_after_revocation(execution, revocation):
         APIToken.objects.filter(pk=parent.pk).update(is_active=False)
     elif revocation == "cancel":
         AgentRun.objects.filter(pk=run_id).update(status="cancelled")
-    elif revocation == "expired":
-        AgentRun.objects.filter(pk=run_id).update(lease_expires_at=timezone.now() - timedelta(seconds=1))
     elif revocation == "spec":
         WorkItemContract.objects.filter(pk=contract.pk).update(spec_revision=2)
     elif revocation == "policy":
@@ -816,7 +818,12 @@ def test_concurrent_dispatchers_cannot_claim_the_same_task_twice(execution):
             start.wait()
             return client.post(
                 prefix + f"work-items/{issue.pk}/claim/",
-                {"agent": str(worker.pk), "worker_id": f"worker-{number}"},
+                {
+                    "agent": str(worker.pk),
+                    "worker_id": f"worker-{number}",
+                    "repository": "example/product",
+                    "base_branch": "main",
+                },
                 format="json",
             ).status_code
         finally:
@@ -917,18 +924,23 @@ def test_audit_record_preserves_run_and_delegation_without_secrets(execution, mo
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("status", ["in_progress", "awaiting_input", "review"])
-def test_expired_runs_are_discoverable_and_reclaimable_in_every_working_status(execution, status):
-    dispatcher, _, _, issue, contract, _, _, _, _, prefix = execution
+def test_idle_runs_cannot_be_reclaimed_in_any_working_status(execution, status, monkeypatch):
+    dispatcher, _, _, issue, contract, _, _, worker, _, prefix = execution
     first = claim(execution)
     old, _ = worker_client(execution, first)
     WorkItemContract.objects.filter(pk=contract.pk).update(status=status)
-    AgentRun.objects.filter(pk=first).update(lease_expires_at=timezone.now() - timedelta(seconds=1))
+    later = timezone.now() + timedelta(days=1)
+    monkeypatch.setattr(timezone, "now", lambda: later)
     candidates = dispatcher.get(prefix + "candidates/")
     assert candidates.status_code == 200, candidates.data
-    assert str(contract.pk) in [str(row["id"]) for row in candidates.data["results"]]
-    second = claim(execution)
-    assert AgentRun.objects.get(pk=second).attempt == 2
-    assert old.get(prefix + f"runs/{first}/").status_code == 403
+    assert candidates.data["results"] == []
+    response = dispatcher.post(
+        prefix + f"work-items/{issue.pk}/claim/",
+        {"agent": str(worker.pk), "worker_id": "replacement", "repository": "example/product", "base_branch": "main"},
+        format="json",
+    )
+    assert response.status_code == 409, response.data
+    assert old.get(prefix + f"runs/{first}/").status_code == 200
 
 
 @pytest.mark.django_db
@@ -1037,7 +1049,12 @@ def test_claim_replays_recheck_project_and_issue_availability(execution):
 
     dispatcher, _, project, issue, _, _, _, worker, _, prefix = execution
     url = prefix + f"work-items/{issue.pk}/claim/"
-    payload = {"agent": str(worker.pk), "worker_id": "replay-worker"}
+    payload = {
+        "agent": str(worker.pk),
+        "worker_id": "replay-worker",
+        "repository": "example/product",
+        "base_branch": "main",
+    }
     assert dispatcher.post(url, payload, format="json", HTTP_IDEMPOTENCY_KEY="claim").status_code == 201
     Project.objects.filter(pk=project.pk).update(archived_at=timezone.now())
     assert dispatcher.post(url, payload, format="json", HTTP_IDEMPOTENCY_KEY="claim").status_code == 404

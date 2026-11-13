@@ -32,29 +32,21 @@ const policy = async (project) => {
 try {
   const before = await policy(fixture.second_project);
   await page.goto(web + route(fixture.second_project));
-  await page.getByLabel("Repository (owner/name)").first().waitFor();
-  assert.equal(await page.getByLabel("Repository (owner/name)").first().inputValue(), "example/second");
+  await page.getByLabel("Required CI checks").waitFor();
+  assert.equal(await page.getByLabel("Required CI checks").inputValue(), before.required_checks.join("\n"));
   const timeOrigin = await page.evaluate(() => performance.timeOrigin);
   const navigate = async (project) => {
     await page.evaluate((path) => window.__reactRouterDataRouter.navigate(path), route(project));
     await page.waitForURL(web + route(project));
-    await page.getByLabel("Credential lifetime (seconds)").waitFor();
+    await page.getByLabel("Required CI checks").waitFor();
     assert.equal(await page.evaluate(() => performance.timeOrigin), timeOrigin, "Navigation must stay in the SPA");
   };
   await navigate(fixture.project);
-  if ((await page.getByLabel("Repository (owner/name)").count()) === 0)
-    await page.getByRole("button", { name: "Add repository", exact: true }).click();
-  await page.getByLabel("Repository (owner/name)").first().fill("example/unsaved-first");
-  await page.getByLabel("Base branch", { exact: true }).first().fill("first-only");
-  await page.getByLabel("Credential lifetime (seconds)").fill("300");
-  await page.getByLabel("Execution lease (seconds)").fill("600");
+  await page.getByLabel("Required CI checks").fill("unsaved-first-check");
   await page.getByLabel("Identifier", { exact: true }).fill("UNSAVED");
   await page.getByLabel("Release name", { exact: true }).fill("First project draft");
   await navigate(fixture.second_project);
-  assert.equal(await page.getByLabel("Repository (owner/name)").first().inputValue(), "example/second");
-  assert.equal(await page.getByLabel("Base branch", { exact: true }).first().inputValue(), "develop");
-  assert.equal(await page.getByLabel("Credential lifetime (seconds)").inputValue(), "600");
-  assert.equal(await page.getByLabel("Execution lease (seconds)").inputValue(), "1200");
+  assert.equal(await page.getByLabel("Required CI checks").inputValue(), before.required_checks.join("\n"));
   assert.equal(await page.getByLabel("Identifier", { exact: true }).inputValue(), "");
   assert.equal(await page.getByLabel("Release name", { exact: true }).inputValue(), "");
   const contextReference = `https://example.com/second/${randomUUID()}`;

@@ -38,10 +38,8 @@ class ProjectRelease(ProjectBaseModel):
 
 class ProjectExecutionPolicy(ProjectBaseModel):
     enabled = models.BooleanField(default=False)
-    repositories = models.JSONField(default=list)
+    required_checks = models.JSONField(default=list)
     context_references = models.JSONField(default=list)
-    credential_lifetime = models.DurationField(null=True, blank=True)
-    execution_lease = models.DurationField(null=True, blank=True)
 
     class Meta:
         db_table = "project_execution_policies"
@@ -198,7 +196,6 @@ class AgentRun(ProjectBaseModel):
     repository = models.CharField(max_length=511)
     base_branch = models.CharField(max_length=255)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.ACTIVE)
-    lease_expires_at = models.DateTimeField()
     last_heartbeat = models.DateTimeField(default=timezone.now)
     handed_off_at = models.DateTimeField(null=True, blank=True)
     finished_at = models.DateTimeField(null=True, blank=True)

@@ -50,7 +50,6 @@ def build_patterns(machine=False):
             path(base + "runs/<uuid:run_id>/credentials/", views.CredentialEndpoint.as_view()),
             path(base + "runs/<uuid:run_id>/handoff/", views.HandoffEndpoint.as_view()),
             path(base + "runs/<uuid:run_id>/refresh/", views.RefreshEndpoint.as_view()),
-            path(base + "runs/<uuid:run_id>/renew/", views.RenewEndpoint.as_view()),
             path(base + "runs/<uuid:run_id>/heartbeat/", views.HeartbeatEndpoint.as_view()),
             path(base + "work-items/<uuid:issue_id>/questions/", workflow_views.QuestionsEndpoint.as_view()),
             path(
@@ -62,7 +61,14 @@ def build_patterns(machine=False):
             path(base + "runs/<uuid:run_id>/evidence/", workflow_views.EvidenceEndpoint.as_view()),
         ]
     else:
-        patterns += [path(base + "runs/<uuid:run_id>/cancel/", views.CancelRunEndpoint.as_view())]
+        patterns += [
+            path(base + "runs/<uuid:run_id>/cancel/", views.CancelRunEndpoint.as_view()),
+            path(base + "agents/<uuid:access_id>/credentials/", views.AgentCredentialsEndpoint.as_view()),
+            path(
+                base + "agents/<uuid:access_id>/credentials/<uuid:credential_id>/",
+                views.AgentCredentialDetailEndpoint.as_view(),
+            ),
+        ]
     patterns += [
         path(base + route, getattr(review_views, selected + name).as_view())
         for route, name in [

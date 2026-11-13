@@ -39,12 +39,6 @@ try {
   await page.goto(`${web}/${fixture.workspace}/settings/projects/${fixture.project}/coordination/`);
   await page.getByRole("heading", { name: "Execution Policy", exact: true }).waitFor();
   await page.getByLabel("Agent execution enabled").check();
-  await page.getByLabel("Credential lifetime (seconds)").fill("300");
-  await page.getByLabel("Execution lease (seconds)").fill("600");
-  if ((await page.getByLabel("Repository (owner/name)").count()) === 0)
-    await page.getByRole("button", { name: "Add repository" }).click();
-  await page.getByLabel("Repository (owner/name)").first().fill("example/product");
-  await page.getByLabel("Base branch", { exact: true }).first().fill("main");
   await page.getByLabel("Required CI checks").first().fill("tests");
   await page.getByLabel("Context references").fill(`https://example.com/docs/${fixture.issue}`);
   await page.getByRole("button", { name: "Save policy", exact: true }).click();
@@ -142,7 +136,7 @@ try {
     key: fixture.dispatcher_token,
     method: "POST",
     expected: 201,
-    data: { agent: fixture.worker, worker_id: "browser-worker", repository: "example/product" },
+    data: { agent: fixture.worker, worker_id: "browser-worker", repository: "example/product", base_branch: "main" },
   });
   const credential = await api(machine + `runs/${run.id}/credentials/`, {
     key: fixture.dispatcher_token,

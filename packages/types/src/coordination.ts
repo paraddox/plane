@@ -48,19 +48,11 @@ export type TProjectRelease = {
   created_at: string;
   updated_at: string;
 };
-export type TRepositoryPolicy = {
-  repository: string;
-  base_branch: string;
-  required_checks: string[];
-  merge_method: "merge";
-};
 export type TExecutionPolicy = {
   project: string;
   enabled: boolean;
-  repositories: TRepositoryPolicy[];
+  required_checks: string[];
   context_references: string[];
-  credential_lifetime: string | null;
-  execution_lease: string | null;
 };
 export type TAgentRun = {
   id: string;
@@ -84,7 +76,6 @@ export type TAgentRun = {
   repository: string;
   base_branch: string;
   status: "active" | "merging" | "merged" | "cancelled" | "expired";
-  lease_expires_at: string;
   last_heartbeat: string;
   finished_at: string | null;
   head_sha: string;
@@ -177,4 +168,17 @@ export type TCoordinationAgent = {
   name: string;
   role: "dispatcher" | "worker";
   is_active: boolean;
+};
+export type TAgentCredential = {
+  id: string;
+  label: string;
+  is_active: boolean;
+  expired_at: string | null;
+  created_at: string;
+  last_used: string | null;
+};
+export type TAgentCredentialSecret = TAgentCredential & { token: string };
+export type TMainAgentRegistration = {
+  agent: TCoordinationAgent;
+  credential: TAgentCredentialSecret;
 };
