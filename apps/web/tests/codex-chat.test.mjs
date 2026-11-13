@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { setImmediate } from "node:timers/promises";
 import { test } from "node:test";
 import { runInNewContext } from "node:vm";
 import React from "react";
@@ -11,7 +12,7 @@ const require = createRequire(import.meta.url);
 function MockService() {}
 const Conversation = () => null;
 const source = readFileSync(new URL("../core/components/coordination/conversation.tsx", import.meta.url), "utf8");
-function load(react = React) {
+function load(react = React, globals = {}) {
   const compiled = ts.transpileModule(source, {
     compilerOptions: { target: ts.ScriptTarget.ESNext, jsx: ts.JsxEmit.ReactJSX, module: ts.ModuleKind.CommonJS },
   });
@@ -32,6 +33,7 @@ function load(react = React) {
   runInNewContext(compiled.outputText + "\nexports.ConversationDialog = ConversationDialog;", {
     exports,
     require: (specifier) => mocks[specifier] ?? require(specifier),
+    ...globals,
   });
   return exports;
 }
@@ -67,6 +69,55 @@ test("scroll effect never returns the browser's scroll result as a React cleanup
   });
   assert.equal(effects[1](), undefined);
 });
+
+for (const streamFirst of [false, true]) {
+  test(`history request errors ${streamFirst ? "after" : "before"} a live snapshot do not leave a stale chat error`, async () => {
+    const request = Promise.withResolvers();
+    const effects = [];
+    const updates = [];
+    const listeners = new Map();
+    class EventStream {
+      addEventListener(name, listener) {
+        listeners.set(name, listener);
+      }
+      close() {}
+    }
+    MockService.prototype.get = () => request.promise;
+    try {
+      const component = load(
+        {
+          ...React,
+          useState: (initial) => [initial, (value) => updates.push(value)],
+          useRef: (initial) => ({ current: initial }),
+          useEffect: (effect) => effects.push(effect),
+        },
+        { EventSource: EventStream }
+      );
+      component.ConversationDialog({
+        workspaceSlug: "test",
+        projectId: "project",
+        issueId: "issue",
+        canWrite: true,
+        onClose: () => {},
+      });
+      const cleanup = effects[0]();
+      const snapshot = { revision: 1, state: "idle", messages: [], closed: false, error: "" };
+      const receive = () => listeners.get("message")({ data: JSON.stringify(snapshot) });
+      if (streamFirst) receive();
+      const failure = new Error("Initial history request failed");
+      request.reject(failure);
+      await request.promise.catch(() => {});
+      await setImmediate(); // Drain promise reactions crossing the VM boundary.
+      assert.equal(updates.includes(String(failure)), !streamFirst);
+      if (!streamFirst) receive();
+      assert.ok(updates.some((value) => value?.revision === snapshot.revision));
+      assert.equal(updates.at(-1), "");
+      cleanup();
+    } finally {
+      delete MockService.prototype.get;
+    }
+  });
+}
 
 test("switching work items remounts conversation state instead of carrying a draft to another task", () => {
   const wrapper = readFileSync(

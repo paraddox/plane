@@ -71,7 +71,7 @@ function ConversationDialog({
         const response = await api.get(path);
         if (active && !streamed) setData(response.data as Conversation);
       } catch (failure) {
-        if (active) setLoadError(coordinationError(failure));
+        if (active && !streamed) setLoadError(coordinationError(failure));
       }
     }
     void load();
