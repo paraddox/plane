@@ -10,6 +10,7 @@ import psycopg
 from asgiref.sync import sync_to_async
 from django.db import transaction
 from django.db.models import Q
+from rest_framework.permissions import SAFE_METHODS
 
 from plane.db.models import AgentRun, CoordinationEvent, Project, FileAsset
 from plane.db.models.codex import AgentChatMessage, CodexCommand, CodexProject, CodexThread
@@ -30,7 +31,8 @@ TOOLS = [
             "path relative to project's /api/v1/workspaces/slug/projects/id/); worker_status (observe only); "
             "send_to_worker / send_to_chat (args.text, args.message_id UUID for deduplication); "
             "inbox (read queued/delivered coordination messages); acknowledge (args.message_id). "
-            "read_spec; acknowledge_spec (implementation only, args.expected_revision). "
+            "read_spec (current specification plus task details); "
+            "acknowledge_spec (implementation only, args.expected_revision). "
             "share_file (args.path absolute on your host, args.message_id UUID, args.text caption): "
             "upload a screenshot/document from your host as a work-item attachment and display it in chat. "
             "download_asset (args.asset_id, args.path absolute on your host): retrieve a task attachment "
@@ -69,6 +71,7 @@ class Runtime:
         self.woken = asyncio.Event()
         self.events = asyncio.Queue()
         self.credentials = {}
+        self.assignments = {}
         self.api = httpx.AsyncClient(base_url=config.api_url, timeout=None, follow_redirects=False)
         self.clients = {
             name: CodexClient(
@@ -247,7 +250,7 @@ class Runtime:
         # GET verifies the dispatcher still owns this run even after a partial dispatch.
         await self.api_call(config, "GET", prefix + f"runs/{run.pk}/")
         if not run.handed_off_at:
-            await self.api_call(config, "POST", prefix + f"runs/{run.pk}/handoff/", {})
+            await self.assignment_token(config, run.pk)
         project = await db(Project.objects.get)(pk=thread.project_id)
         worker = await self.binding(config, project, "implementation", run)
         chat = await self.binding(config, project, "chat", run)
@@ -275,10 +278,20 @@ class Runtime:
     def address(thread):
         return {"host_id": thread.host_id, "runtime_id": thread.runtime_id, "thread_id": thread.thread_id}
 
-    async def task_token(self, thread):
+    async def assignment_token(self, project, run_id):
+        identifier = str(run_id)
+        if identifier not in self.assignments:
+            response = await self.api_call(project, "POST", f"coordination/runs/{run_id}/handoff/", {})
+            self.assignments[identifier] = response["token"]
+            self.credentials.pop(identifier, None)
+        return self.assignments[identifier]
+
+    async def task_token(self, thread, *, read_only=False):
         run = await db(AgentRun.objects.select_related("contract").get)(pk=thread.run_id)
         cached = self.credentials.get(str(run.pk))
         if run.spec_revision != run.contract.spec_revision:
+            if read_only:
+                return await self.assignment_token(self.project(thread), run.pk)
             raise ValueError(
                 "Specification changed. Read the current specification with read_spec, then explicitly use "
                 "acknowledge_spec with args.expected_revision before continuing implementation."
@@ -303,10 +316,11 @@ class Runtime:
         if action == "dispatch":
             return await self.dispatch(thread, values["issue_id"])
         if action == "task_api":
-            token = await self.task_token(thread) if thread.run_id else None
+            method = values.get("method", "GET").upper()
+            token = await self.task_token(thread, read_only=method in SAFE_METHODS) if thread.run_id else None
             return await self.api_call(
                 self.project(thread),
-                values.get("method", "GET").upper(),
+                method,
                 values["path"],
                 values.get("data"),
                 token=token,
@@ -314,18 +328,26 @@ class Runtime:
         if action in ("read_spec", "acknowledge_spec") and thread.run_id:
             run = await db(AgentRun.objects.select_related("contract").get)(pk=thread.run_id)
             if action == "read_spec":
-                return await self.api_call(
-                    self.project(thread), "GET", f"coordination/work-items/{run.contract.issue_id}/contract/"
+                token = await self.task_token(thread, read_only=True)
+                specification = await self.api_call(
+                    self.project(thread),
+                    "GET",
+                    f"coordination/work-items/{run.contract.issue_id}/contract/",
+                    token=token,
                 )
+                task = await self.api_call(
+                    self.project(thread), "GET", f"work-items/{run.contract.issue_id}/", token=token
+                )
+                return {**specification, "task": task}
             if thread.role != "implementation":
                 raise ValueError("Only the implementation thread acknowledges specification changes")
-            handoff = await self.api_call(self.project(thread), "POST", f"coordination/runs/{run.pk}/handoff/", {})
+            assignment = await self.assignment_token(self.project(thread), run.pk)
             response = await self.api_call(
                 self.project(thread),
                 "POST",
                 f"coordination/runs/{run.pk}/refresh/",
                 {"expected_revision": values["expected_revision"]},
-                token=handoff["token"],
+                token=assignment,
             )
             self.credentials[str(run.pk)] = (values["expected_revision"], response["token"])
             return {"acknowledged_revision": values["expected_revision"]}
@@ -375,7 +397,7 @@ class Runtime:
         path = PurePosixPath(values["path"])
         if not path.is_absolute():
             raise ValueError("Use an absolute destination path on the project's owning host")
-        token = await self.task_token(thread)
+        token = await self.task_token(thread, read_only=True)
         asset = await self.api_call(
             self.project(thread), "GET", f"coordination/runs/{thread.run_id}/assets/{values['asset_id']}/", token=token
         )
@@ -572,6 +594,7 @@ class Runtime:
                     state="cancelled"
                 )
                 self.credentials.pop(str(thread.run_id), None)
+                self.assignments.pop(str(thread.run_id), None)
                 if cancelled or messages:
                     await db(wake)()
                 if not client or not client.ready:

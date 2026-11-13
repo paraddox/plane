@@ -46,6 +46,144 @@ def runtime_case(execution, tmp_path):
     asyncio.run(runtime.api.aclose())
 
 
+@pytest.fixture
+def runtime_api_case(runtime_case, execution):
+    from asgiref.sync import sync_to_async
+    from rest_framework.test import APIClient
+
+    runtime, worker, chat, issue = runtime_case
+    prefix = execution[-1].removesuffix("coordination/")
+    dispatcher_key = execution[0]._credentials["HTTP_X_API_KEY"]
+
+    async def api_call(project, method, path, data=None, token=None):
+        def request():
+            client = APIClient()
+            client.credentials(HTTP_X_API_KEY=token or dispatcher_key)
+            response = client.generic(method, prefix + path, json.dumps(data or {}), content_type="application/json")
+            if response.status_code >= 400:
+                raise ValueError(f"Plane API {response.status_code}: {response.data}")
+            return response.data
+
+        return await sync_to_async(request)()
+
+    runtime.api_call = api_call
+    asyncio.run(runtime.task_token(worker))
+    human = execution[1]
+    response = human.patch(
+        f"/api/workspaces/{issue.project.workspace.slug}/projects/{issue.project_id}/issues/{issue.pk}/",
+        {
+            "description_html": "<p>New human description</p>",
+            "requirements": "Revised requirement",
+            "expected_revision": 1,
+        },
+        format="json",
+    )
+    assert response.status_code == 200, response.data
+    return runtime, worker, chat, issue
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("role", ["implementation", "chat"])
+def test_revised_task_context_can_be_read_before_explicit_execution_acknowledgement(runtime_api_case, role):
+    from asgiref.sync import sync_to_async
+    from plane.db.models import APIToken
+
+    runtime, worker, chat, issue = runtime_api_case
+    reader = worker if role == "implementation" else chat
+    path = f"work-items/{issue.pk}/"
+
+    async def exercise():
+        task = await runtime.tool(reader, {"action": "task_api", "args": {"path": path}})
+        assert task["description_html"] == "<p>New human description</p>"
+        specification = await runtime.tool(reader, {"action": "read_spec", "args": {}})
+        assert specification["spec_revision"] == 2
+        assert specification["requirements"] == "Revised requirement"
+        assert specification["task"]["description_html"] == task["description_html"]
+        assignment = await sync_to_async(
+            lambda: APIToken.objects.get(agent_run_id=worker.run_id, purpose="assignment", is_active=True).pk
+        )()
+        with pytest.raises(ValueError, match="Specification changed"):
+            await runtime.tool(
+                worker, {"action": "task_api", "args": {"method": "PATCH", "path": path, "data": {"name": "Too soon"}}}
+            )
+        if role == "chat":
+            with pytest.raises(ValueError, match="Only the implementation"):
+                await runtime.tool(chat, {"action": "acknowledge_spec", "args": {"expected_revision": 2}})
+        assert not await sync_to_async(
+            APIToken.objects.filter(agent_run_id=worker.run_id, purpose="execution", is_active=True).exists
+        )()
+        acknowledged = await runtime.tool(worker, {"action": "acknowledge_spec", "args": {"expected_revision": 2}})
+        assert acknowledged == {"acknowledged_revision": 2}
+        await runtime.tool(chat, {"action": "task_api", "args": {"path": path}})
+        changed = await runtime.tool(
+            worker,
+            {"action": "task_api", "args": {"method": "PATCH", "path": path, "data": {"name": "Acknowledged work"}}},
+        )
+        assert changed["name"] == "Acknowledged work"
+        assert (
+            await sync_to_async(
+                lambda: APIToken.objects.get(agent_run_id=worker.run_id, purpose="assignment", is_active=True).pk
+            )()
+            == assignment
+        )
+
+    asyncio.run(exercise())
+    worker.run.refresh_from_db()
+    assert worker.run.spec_revision == 2
+    assert worker.run.credentials.filter(purpose="assignment", is_active=True).count() == 1
+    assert worker.run.credentials.filter(purpose="execution", is_active=True).count() == 1
+
+
+@pytest.mark.django_db(transaction=True)
+def test_revised_task_attachment_download_stays_scoped_without_acknowledging_execution(runtime_api_case, monkeypatch):
+    import httpx
+    from plane.coordination import notification_views
+    from plane.db.models import FileAsset, Issue
+
+    runtime, worker, _, issue = runtime_api_case
+    asset = FileAsset.objects.create(
+        project=issue.project,
+        workspace=issue.project.workspace,
+        issue=issue,
+        is_uploaded=True,
+        asset="task/revised-requirements.txt",
+        attributes={"name": "requirements.txt"},
+    )
+    foreign = Issue(project=issue.project, name="Not assigned", created_by=issue.created_by)
+    foreign.save(disable_auto_set_user=True)
+    foreign_asset = FileAsset.objects.create(
+        project=issue.project, workspace=issue.project.workspace, issue=foreign, is_uploaded=True
+    )
+    monkeypatch.setattr(
+        notification_views,
+        "S3Storage",
+        Mock(return_value=Mock(generate_presigned_url=Mock(return_value="http://storage/requirements.txt"))),
+    )
+    runtime.api.get = AsyncMock(
+        return_value=httpx.Response(
+            200, content=b"New requirements", request=httpx.Request("GET", "http://storage/requirements.txt")
+        )
+    )
+
+    async def exercise():
+        result = await runtime.tool(
+            worker, {"action": "download_asset", "args": {"asset_id": str(asset.pk), "path": "/tmp/requirements.txt"}}
+        )
+        assert result["asset_id"] == str(asset.pk)
+        with pytest.raises(ValueError, match="Plane API 404"):
+            await runtime.tool(
+                worker,
+                {"action": "download_asset", "args": {"asset_id": str(foreign_asset.pk), "path": "/tmp/foreign.txt"}},
+            )
+
+    asyncio.run(exercise())
+    worker.run.refresh_from_db()
+    assert worker.run.spec_revision == 1
+    runtime.clients["local"].request.assert_awaited_once_with(
+        "fs/writeFile", {"path": "/tmp/requirements.txt", "dataBase64": "TmV3IHJlcXVpcmVtZW50cw=="}
+    )
+
+
 @pytest.mark.django_db(transaction=True)
 def test_busy_worker_keeps_working_while_chat_observes_and_queues(runtime_case):
     runtime, worker, chat, _ = runtime_case
@@ -171,11 +309,13 @@ def test_closure_cancels_unsent_chat_messages_even_when_host_is_offline(runtime_
     worker.run.save(update_fields=["status"])
     runtime.clients["local"].ready = connected
     runtime.credentials[str(worker.run_id)] = (1, "private-cached-key")
+    runtime.assignments[str(worker.run_id)] = "private-assignment-key"
     asyncio.run(runtime.pump())
     message.refresh_from_db()
     assert message.state == "cancelled"
     assert chat.commands.get(pk=message.pk).state == "cancelled"
     assert str(worker.run_id) not in runtime.credentials
+    assert str(worker.run_id) not in runtime.assignments
 
 
 @pytest.mark.django_db(transaction=True)

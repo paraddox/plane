@@ -93,10 +93,13 @@ keeping a browser open. The chat thread can observe worker status and queue a
 message with the `plane` tool. The worker consumes messages at checkpoints or in
 its next idle turn. Ordinary chat never steers or interrupts its active turn.
 
-The connector owns one credential cache per run. Both threads use the existing
+The connector manages assignment and execution credentials per run. Both threads use the existing
 task-scoped API through the tool; raw keys never enter the model context. A
-specification change must be read with `read_spec` and explicitly acknowledged by
-implementation using `acknowledge_spec` before new execution authority is issued.
+specification change can be inspected with `read_spec` (including current task
+details), read-only task API calls and attachment downloads using the existing
+scoped assignment authority. This does not authorize writes or advance the run's
+revision. Implementation must explicitly use `acknowledge_spec` before new
+execution authority is issued; the chat thread cannot acknowledge on its behalf.
 Human review and merge authorization continue to use the existing protected APIs.
 
 Codex's original session, on its original machine, remains the conversation state.
