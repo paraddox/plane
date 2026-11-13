@@ -84,6 +84,101 @@ def test_feedback_routes_directly_to_both_task_threads_not_overseer(runtime_case
 
 
 @pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("archived", [False, True])
+@pytest.mark.parametrize("old_dispatch_pending", [False, True])
+def test_reopened_task_is_dispatched_again_instead_of_routed_to_old_threads(
+    runtime_case, execution, archived, old_dispatch_pending
+):
+    from plane.db.models import State
+
+    runtime, worker, chat, issue = runtime_case
+    _, human, project, _, _, _, _, _, _, prefix = execution
+    overseer = CodexThread.objects.create(project=project, role="overseer", host_id="mac", runtime_id="local")
+    previous_ready = CoordinationEvent.objects.filter(issue=issue, kind="task.ready").last()
+    if old_dispatch_pending:
+        CodexCommand.objects.create(thread=overseer, event=previous_ready, text="Previous dispatch", state="sent")
+    session = prefix.replace("/api/v1/", "/api/", 1)
+    assert human.post(session + f"runs/{worker.run_id}/cancel/", {}, format="json").status_code == 200
+    if archived:
+        CodexThread.objects.filter(run_id=worker.run_id).update(state="archived")
+    state = State.objects.get(project=project, name="Todo")
+    response = human.patch(
+        f"/api/workspaces/{project.workspace.slug}/projects/{project.pk}/issues/{issue.pk}/",
+        {"state_id": str(state.pk)},
+        format="json",
+    )
+    assert response.status_code == 200, response.data
+    ready = CoordinationEvent.objects.filter(issue=issue, kind="task.ready").last()
+    assert ready.sequence > previous_ready.sequence
+    assert ready.spec_revision == previous_ready.spec_revision
+    asyncio.run(runtime.collect_events())
+    assert CodexCommand.objects.filter(thread=overseer, event=ready).exists()
+    assert not CodexCommand.objects.filter(thread__in=[worker, chat], event=ready).exists()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("method", ["turn/started", "item/completed"])
+def test_chat_progress_notifications_publish_delivery_state(runtime_case, monkeypatch, method):
+    from plane.coordination.codex import runtime as module
+    from plane.coordination.codex.chat import ensure_conversation, post_message
+
+    runtime, _, chat, issue = runtime_case
+    conversation = ensure_conversation(issue)
+    conversation.chat = chat
+    conversation.save()
+    message = post_message(issue, issue.created_by, uuid4(), "Please check progress", [])
+    params = {"threadId": "chat", "turnId": "chat-turn"}
+    if method == "turn/started":
+        params["turn"] = {"id": "chat-turn"}
+    else:
+        params["item"] = {"type": "userMessage", "clientId": str(message.pk)}
+    publish = Mock()
+    monkeypatch.setattr(module, "wake", publish)
+    asyncio.run(runtime.notification("local", {"method": method, "params": params}))
+    publish.assert_called_once_with()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_turn_acceptance_publishes_sent_chat_message_before_any_reply(runtime_case, monkeypatch):
+    from plane.coordination.codex import runtime as module
+    from plane.coordination.codex.chat import ensure_conversation, post_message
+
+    runtime, _, chat, issue = runtime_case
+    conversation = ensure_conversation(issue)
+    conversation.chat = chat
+    conversation.save()
+    message = post_message(issue, issue.created_by, uuid4(), "A long-running status request", [])
+    runtime.clients["local"].request.return_value = {"turn": {"id": "chat-turn"}}
+    publish = Mock()
+    monkeypatch.setattr(module, "wake", publish)
+    asyncio.run(runtime.pump())
+    message.refresh_from_db()
+    assert message.state == "sent"
+    publish.assert_called_once_with()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("connected", [False, True])
+def test_closure_cancels_unsent_chat_messages_even_when_host_is_offline(runtime_case, connected):
+    from plane.coordination.codex.chat import ensure_conversation, post_message
+
+    runtime, worker, chat, issue = runtime_case
+    conversation = ensure_conversation(issue)
+    conversation.chat = chat
+    conversation.save()
+    message = post_message(issue, issue.created_by, uuid4(), "Never sent to Codex", [])
+    worker.run.status = "cancelled"
+    worker.run.save(update_fields=["status"])
+    runtime.clients["local"].ready = connected
+    runtime.credentials[str(worker.run_id)] = (1, "private-cached-key")
+    asyncio.run(runtime.pump())
+    message.refresh_from_db()
+    assert message.state == "cancelled"
+    assert chat.commands.get(pk=message.pk).state == "cancelled"
+    assert str(worker.run_id) not in runtime.credentials
+
+
+@pytest.mark.django_db(transaction=True)
 def test_terminal_task_archives_task_threads_not_project(runtime_case):
     runtime, worker, chat, issue = runtime_case
     worker.run.status = "cancelled"

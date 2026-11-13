@@ -483,8 +483,10 @@ class Runtime:
                 await db(AgentChatMessage.objects.filter(pk=identifier).exclude(state="completed").update)(
                     state="sent", turn_id=params["turnId"]
                 )
+                await db(wake)()
         elif method == "turn/started":
             await db(CodexThread.objects.filter(pk=thread.pk).update)(state="busy", active_turn=params["turn"]["id"])
+            await db(wake)()
         elif method == "turn/completed":
             turn = params["turn"]
             state = "completed" if turn["status"] == "completed" else "failed"
@@ -508,17 +510,34 @@ class Runtime:
             for event in CoordinationEvent.objects.filter(
                 project=state.project, sequence__gt=state.event_cursor
             ).select_related("actor"):
-                bindings = CodexThread.objects.filter(
-                    run__targets__issue_id=event.issue_id, project=state.project
-                ).distinct()
+                bindings = (
+                    CodexThread.objects.filter(
+                        run__targets__issue_id=event.issue_id,
+                        run__status__in=["active", "merging"],
+                        project=state.project,
+                    )
+                    .exclude(state="archived")
+                    .distinct()
+                )
                 if event.kind == "task.ready" and not bindings.exists():
                     bindings = CodexThread.objects.filter(project=state.project, role="overseer")
-                    if CodexCommand.objects.filter(
+                    pending = CodexCommand.objects.filter(
                         thread__in=bindings,
                         event__kind="task.ready",
                         event__issue_id=event.issue_id,
                         state__in=["queued", "submitting", "sent", "uncertain"],
-                    ).exists():
+                    )
+                    latest_claim = (
+                        CoordinationEvent.objects.filter(
+                            project=state.project, issue_id=event.issue_id, kind="run.claimed"
+                        )
+                        .values_list("sequence", flat=True)
+                        .last()
+                    )
+                    if latest_claim is not None:
+                        # A fulfilled dispatch must not suppress a later reopening of the same specification.
+                        pending = pending.filter(event__sequence__gt=latest_claim)
+                    if pending.exists():
                         state.event_cursor = event.sequence
                         continue
                 elif event.kind not in WORKER_EVENT_TYPES or (event.actor and event.actor.is_bot):
@@ -545,18 +564,25 @@ class Runtime:
             if str(thread.project_id) not in self.projects:
                 continue
             client = self.clients.get(thread.runtime_id)
-            if not client or not client.ready:
-                continue
             if thread.run_id and (
                 thread.run.status not in ("active", "merging") or is_closed(thread.run.contract.issue)
             ):
+                cancelled = await db(thread.commands.filter(state="queued").update)(state="cancelled")
+                messages = await db(AgentChatMessage.objects.filter(thread=thread, state="queued").update)(
+                    state="cancelled"
+                )
+                self.credentials.pop(str(thread.run_id), None)
+                if cancelled or messages:
+                    await db(wake)()
+                if not client or not client.ready:
+                    continue
                 if thread.active_turn:
                     await client.request("turn/interrupt", {"threadId": thread.thread_id, "turnId": thread.active_turn})
                 await client.request("thread/archive", {"threadId": thread.thread_id})
                 await db(CodexThread.objects.filter(pk=thread.pk).update)(state="archived")
-                await db(thread.commands.filter(state="queued").update)(state="cancelled")
-                self.credentials.pop(str(thread.run_id), None)
                 await db(wake)()
+                continue
+            if not client or not client.ready:
                 continue
             if thread.state != "idle":
                 continue
@@ -586,6 +612,7 @@ class Runtime:
                     )(state="sent", turn_id=turn_id)
                 if changed:
                     await db(CodexThread.objects.filter(pk=thread.pk).update)(state="busy", active_turn=turn_id)
+                    await db(wake)()
             except (ConnectionError, RPCError):
                 # Even an RPC error can follow an accepted turn. Reconcile; never auto-repeat it.
                 try:
