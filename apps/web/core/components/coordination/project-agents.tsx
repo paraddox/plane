@@ -191,6 +191,10 @@ function AgentCredentials({
                   setError("");
                   try {
                     await service.revokeAgentCredential(workspaceSlug, projectId, agent.id, revoking.id);
+                    await refresh(
+                      (current) => current?.map((key) => (key.id === revoking.id ? { ...key, is_active: false } : key)),
+                      { revalidate: false }
+                    );
                     setRevoking(null);
                     await refresh();
                   } catch (failure) {

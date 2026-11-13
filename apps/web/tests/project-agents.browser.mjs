@@ -46,6 +46,16 @@ async function failCreate(route) {
   else await route.continue();
 }
 
+async function failKeyRead(route) {
+  if (route.request().method() === "GET")
+    await route.fulfill({
+      status: 503,
+      contentType: "application/json",
+      body: JSON.stringify({ detail: "Key list unavailable" }),
+    });
+  else await route.continue();
+}
+
 try {
   await page.goto(settingsUrl);
   const section = page.getByRole("region", { name: "Registered agents", exact: true });
@@ -112,6 +122,13 @@ try {
   assert.ok((await secretInput.inputValue()) === second.token, "The new key matches issuance");
   await dialog.getByRole("button", { name: "Done", exact: true }).click();
   assert.equal(await keyStatus(second.token), 200);
+  const keyListUrl = web + prefix + `agents/${agent.id}/credentials/`;
+  await page.route(keyListUrl, failKeyRead);
+  await keys.getByRole("button", { name: "Refresh API keys", exact: true }).click();
+  await expect(keys.getByRole("alert")).toHaveText("Key list unavailable");
+  await page.unroute(keyListUrl, failKeyRead);
+  await keys.getByRole("button", { name: "Refresh API keys", exact: true }).click();
+  await expect(keys.getByRole("alert")).toHaveCount(0);
   await keys.getByRole("button", { name: `Revoke API key ${second.id}`, exact: true }).click();
   const revoke = page.getByRole("dialog", { name: "Revoke API key?", exact: true });
   await expect(revoke).toBeVisible();
@@ -121,11 +138,18 @@ try {
   const revokedResponse = page.waitForResponse(
     (response) => response.request().method() === "DELETE" && response.url().endsWith(`/${second.id}/`)
   );
+  await page.route(keyListUrl, failKeyRead);
   await revoke.getByRole("button", { name: "Revoke API key", exact: true }).click();
   assert.equal((await revokedResponse).status(), 204);
   await expect(revoke).toHaveCount(0);
   assert.equal(await keyStatus(second.token), 403);
   assert.equal(await keyStatus(result.credential.token), 200);
+  const revokedRow = keys.getByRole("listitem").filter({ hasText: second.id });
+  await expect(revokedRow).toContainText("Revoked");
+  await expect(revokedRow.getByRole("button", { name: `Revoke API key ${second.id}`, exact: true })).toHaveCount(0);
+  await page.unroute(keyListUrl, failKeyRead);
+  await keys.getByRole("button", { name: "Refresh API keys", exact: true }).click();
+  await expect(keys.getByRole("alert")).toHaveCount(0);
   await page.setViewportSize({ width: 1440, height: 1000 });
   await keys.scrollIntoViewIfNeeded();
   await screenshot("main-agent-desktop");
@@ -139,6 +163,8 @@ try {
     copy_verified: true,
     scoped_key_usable: true,
     additional_key_and_revocation: true,
+    refresh_failure_recovers_without_reload: true,
+    revocation_stays_visible_when_refresh_fails: true,
     desktop_mobile_fit: true,
     page_errors: errors,
   };
