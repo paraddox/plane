@@ -10,6 +10,7 @@ import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
 // hooks
 import { CloseIcon, SearchIcon } from "@plane/propel/icons";
+import { IconButton } from "@plane/propel/icon-button";
 import { cn } from "@plane/utils";
 // power-k
 import type { TPowerKCommandConfig, TPowerKContext } from "@/components/power-k/core/types";
@@ -101,7 +102,7 @@ export const TopNavPowerK = observer(() => {
     return () => {
       setTopNavInputRef(null);
     };
-  }, [setTopNavInputRef]);
+  }, [setTopNavInputRef, inputRef]);
 
   const handleClear = () => {
     setSearchTerm("");
@@ -203,14 +204,14 @@ export const TopNavPowerK = observer(() => {
         return;
       }
     },
-    [searchTerm, activePage, context, shouldShowContextBasedActions, setActivePage, closePanel]
+    [searchTerm, activePage, context, shouldShowContextBasedActions, setActivePage, closePanel, isOpen, containerRef]
   );
 
   return (
     <div ref={containerRef} className="relative">
       <div
-        className={cn("relative z-30 flex w-[364px] items-center transition-all duration-300 ease-in-out", {
-          "w-[554px]": isOpen,
+        className={cn("relative z-30 flex w-full items-center transition-all duration-300 ease-in-out md:w-[364px]", {
+          "max-md:fixed max-md:inset-x-4 max-md:top-1 max-md:w-auto md:w-[554px]": isOpen,
         })}
       >
         <div
@@ -220,10 +221,18 @@ export const TopNavPowerK = observer(() => {
               "bg-layer-1": isOpen,
             }
           )}
-          onClick={() => inputRef.current?.focus()}
-          role="button"
         >
-          <SearchIcon className="mr-2 size-3.5 shrink-0 text-placeholder" />
+          <IconButton
+            icon={SearchIcon}
+            variant="ghost"
+            size="sm"
+            className="mr-1 -ml-1 shrink-0"
+            aria-label="Search commands"
+            onClick={() => {
+              openPanel();
+              inputRef.current?.focus();
+            }}
+          />
           <input
             ref={inputRef}
             type="text"
@@ -235,6 +244,7 @@ export const TopNavPowerK = observer(() => {
             onMouseDown={handleMouseDown}
             onFocus={handleFocus}
             onKeyDown={handleKeyDown}
+            aria-label="Search commands"
             placeholder="Search commands..."
             className="placeholder-text-placeholder min-w-0 flex-1 bg-transparent text-13 text-primary outline-none"
           />
@@ -249,7 +259,8 @@ export const TopNavPowerK = observer(() => {
         className={cn(
           "shadow-lg absolute -top-[6px] left-1/2 z-20 flex -translate-x-1/2 flex-col overflow-hidden rounded-md border border-subtle bg-surface-1 px-0 pt-10 transition-all duration-300 ease-in-out",
           {
-            "max-h-[80vh] w-[574px] opacity-100": isOpen,
+            "max-h-[80vh] w-[574px] opacity-100 max-md:fixed max-md:inset-x-4 max-md:top-0 max-md:w-auto max-md:translate-x-0":
+              isOpen,
             "h-0 w-0 opacity-0": !isOpen,
           }
         )}

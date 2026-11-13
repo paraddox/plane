@@ -12,6 +12,7 @@ import { TopNavPowerK } from "@/components/navigation";
 import { HelpMenuRoot } from "@/components/workspace/sidebar/help-section/root";
 import { UserMenuRoot } from "@/components/workspace/sidebar/user-menu-root";
 import { WorkspaceMenuRoot } from "@/components/workspace/sidebar/workspace-menu-root";
+import { InboxBackButton } from "@/components/workspace-notifications/back-button";
 import { useAppRailPreferences } from "@/hooks/use-navigation-preferences";
 import { Tooltip } from "@plane/propel/tooltip";
 import { AppSidebarItem } from "@/components/sidebar/sidebar-item";
@@ -23,6 +24,7 @@ export const TopNavigationRoot = observer(function TopNavigationRoot() {
   // router
   const { workspaceSlug } = useParams();
   const pathname = usePathname();
+  const isInbox = pathname.replace(/\/$/, "") === `/${workspaceSlug}/notifications`;
 
   // store hooks
   const { unreadNotificationsCount, getUnreadNotificationsCount } = useWorkspaceNotifications();
@@ -49,11 +51,12 @@ export const TopNavigationRoot = observer(function TopNavigationRoot() {
       })}
     >
       {/* Workspace Menu */}
-      <div className="flex-1 shrink-0">
+      <div className="flex flex-1 shrink-0 items-center gap-1">
+        {isInbox && workspaceSlug && <InboxBackButton workspaceSlug={workspaceSlug.toString()} />}
         <WorkspaceMenuRoot variant="top-navigation" />
       </div>
       {/* Power K Search */}
-      <div className="shrink-0">
+      <div className="min-w-0 flex-1 md:flex-none md:shrink-0">
         <TopNavPowerK />
       </div>
       {/* Additional Actions */}
