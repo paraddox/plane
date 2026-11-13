@@ -50,7 +50,7 @@ export class IssueAttachmentService extends APIService {
     const fileMetaData = await getFileMetaDataForUpload(file);
     return this.post(
       `/api/assets/v2/workspaces/${workspaceSlug}/projects/${projectId}/${this.serviceType}/${issueId}/attachments/`,
-      fileMetaData
+      { ...fileMetaData, type: fileMetaData.type || file.type }
     )
       .then(async (response) => {
         const signedURLResponse: TIssueAttachmentUploadResponse = response?.data;

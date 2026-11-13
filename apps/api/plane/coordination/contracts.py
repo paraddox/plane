@@ -118,6 +118,9 @@ def emit_event(project, kind, *, actor, issue=None, revision=None, payload=None)
     from .notifications import queue_event
 
     queue_event(event)
+    from .codex.signals import wake
+
+    wake()
     return event
 
 
