@@ -249,10 +249,14 @@ class Runtime:
                     if turn["status"] == "completed"
                     else ("sent" if turn["status"] == "inProgress" else "failed")
                 )
-                await db(thread.commands.filter(pk=item["clientId"]).exclude(state="acknowledged").update)(
+                # History captured before a live completion must not reopen a settled delivery.
+                pending_states = ["queued", "submitting", "sent", "uncertain"]
+                await db(thread.commands.filter(pk=item["clientId"], state__in=pending_states).update)(
                     turn_id=turn["id"], state=state
                 )
-                await db(AgentChatMessage.objects.filter(pk=item["clientId"]).update)(turn_id=turn["id"], state=state)
+                await db(AgentChatMessage.objects.filter(pk=item["clientId"], state__in=pending_states).update)(
+                    turn_id=turn["id"], state=state
+                )
             if thread.role == "chat" and item["type"] == "agentMessage":
                 state = "streaming" if turn["status"] == "inProgress" else turn["status"]
                 await db(assistant_message)(

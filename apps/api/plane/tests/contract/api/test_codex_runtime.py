@@ -622,6 +622,50 @@ def test_reconnect_does_not_overwrite_a_concurrent_turn_completion(runtime_case)
     assert worker.state == "idle" and worker.active_turn == ""
 
 
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("final_status", ["completed", "failed"])
+def test_stale_reconnect_history_does_not_regress_finished_chat_delivery(runtime_case, final_status):
+    from plane.coordination.codex.chat import ensure_conversation, post_message
+
+    runtime, _, chat, issue = runtime_case
+    conversation = ensure_conversation(issue)
+    conversation.chat = chat
+    conversation.save()
+    message = post_message(issue, issue.created_by, uuid4(), "Check the implementation", [])
+    command = chat.commands.get(pk=message.pk)
+    command.state, command.turn_id = "sent", "finishing"
+    command.save(update_fields=["state", "turn_id"])
+    message.state, message.turn_id = "sent", "finishing"
+    message.save(update_fields=["state", "turn_id"])
+
+    async def history(thread_id):
+        if thread_id == "chat":
+            # The history response was captured before this live completion arrived.
+            await runtime.notification(
+                "local",
+                {
+                    "method": "turn/completed",
+                    "params": {"threadId": "chat", "turn": {"id": "finishing", "status": final_status}},
+                },
+            )
+            yield {
+                "id": "finishing",
+                "status": "inProgress",
+                "items": [{"type": "userMessage", "clientId": str(message.pk)}],
+            }
+
+    runtime.clients["local"].history = history
+    runtime.clients["local"].request.return_value = {"thread": {"status": {"type": "idle"}}}
+    asyncio.run(runtime.reconnect("local"))
+    command.refresh_from_db()
+    message.refresh_from_db()
+    chat.refresh_from_db()
+    assert command.state == final_status
+    assert message.state == final_status
+    assert chat.state == "idle" and chat.active_turn == ""
+    assert all(call.args[0] != "turn/start" for call in runtime.clients["local"].request.await_args_list)
+
+
 def test_history_reads_all_pages_without_replaying_messages():
     async def exercise():
         client = CodexClient({}, AsyncMock(), AsyncMock(), AsyncMock())
