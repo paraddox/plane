@@ -3,7 +3,7 @@ from django.db.models import Prefetch
 from rest_framework.exceptions import ValidationError
 
 from plane.coordination.contracts import CoordinationConflict
-from plane.db.models import FileAsset
+from plane.db.models import AgentRun, FileAsset
 from plane.db.models.codex import AgentConversation, AgentChatMessage, CodexCommand
 from .signals import wake
 
@@ -107,11 +107,22 @@ def post_message(issue, author, identifier, body, assets):
 
 @transaction.atomic
 def assistant_message(thread, turn_id, item_id, text, *, final, replace=False, state=None):
-    conversation = AgentConversation.objects.select_for_update().filter(chat=thread).first()
+    conversations = AgentConversation.objects.select_for_update()
+    if thread.run_id:
+        # A reopened work item may already point at a newer chat while old output is recovered.
+        conversations = conversations.filter(
+            issue_id__in=AgentRun.objects.filter(pk=thread.run_id).values("contract__issue_id")
+        )
+    else:
+        conversations = conversations.filter(chat=thread)
+    conversation = conversations.first()
     if conversation is None:
         return
     message = AgentChatMessage.objects.filter(thread=thread, item_id=item_id).first()
-    if message and message.state == "completed":
+    incoming_state = state or ("completed" if final else "streaming")
+    if message and (
+        message.state == "completed" or (message.state in ("failed", "interrupted") and incoming_state == "streaming")
+    ):
         return
     conversation.revision += 1
     conversation.save(update_fields=["revision"])
@@ -125,7 +136,7 @@ def assistant_message(thread, turn_id, item_id, text, *, final, replace=False, s
             item_id=item_id,
         )
     message.body = text if final or replace else message.body + text
-    message.state = state or ("completed" if final else "streaming")
+    message.state = incoming_state
     message.save()
     wake()
 

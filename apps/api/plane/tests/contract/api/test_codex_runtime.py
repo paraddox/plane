@@ -372,6 +372,78 @@ def test_reopened_task_is_dispatched_again_instead_of_routed_to_old_threads(
 
 
 @pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("delivery", ["live", "history"])
+@pytest.mark.parametrize("partial", [False, True])
+def test_reopened_task_retains_old_chat_output_without_rebinding_new_chat(runtime_case, execution, delivery, partial):
+    from plane.coordination.codex.chat import assistant_message, ensure_conversation
+    from plane.db.models import State
+    from plane.db.models.codex import AgentChatMessage
+
+    runtime, worker, old_chat, issue = runtime_case
+    _, human, project, _, _, _, _, _, _, prefix = execution
+    conversation = ensure_conversation(issue)
+    conversation.chat = old_chat
+    conversation.save()
+    if partial:
+        assistant_message(old_chat, "previous-turn", "previous-reply", "Partial reply", final=False)
+    session = prefix.replace("/api/v1/", "/api/", 1)
+    assert human.post(session + f"runs/{worker.run_id}/cancel/", {}, format="json").status_code == 200
+    state = State.objects.get(project=project, name="Todo")
+    assert (
+        human.patch(
+            f"/api/workspaces/{project.workspace.slug}/projects/{project.pk}/issues/{issue.pk}/",
+            {"state_id": str(state.pk)},
+            format="json",
+        ).status_code
+        == 200
+    )
+    new_run = claim(execution)
+    new_chat = CodexThread.objects.create(
+        project=project,
+        run_id=new_run,
+        role="chat",
+        host_id="mac",
+        runtime_id="local",
+        thread_id="new-chat",
+        state="idle",
+    )
+    conversation.chat = new_chat
+    conversation.save(update_fields=["chat"])
+    item = {"type": "agentMessage", "id": "previous-reply", "text": "Completed reply from the previous session"}
+
+    async def deliver():
+        if delivery == "live":
+            await runtime.notification(
+                "local",
+                {
+                    "method": "item/completed",
+                    "params": {"threadId": old_chat.thread_id, "turnId": "previous-turn", "item": item},
+                },
+            )
+        else:
+            await runtime.reconcile_turn(old_chat, {"id": "previous-turn", "status": "completed", "items": [item]})
+
+    asyncio.run(deliver())
+    asyncio.run(deliver())
+    conversation.refresh_from_db()
+    assert conversation.chat_id == new_chat.pk
+    message = AgentChatMessage.objects.get(conversation=conversation)
+    assert message.thread_id == old_chat.pk and message.body == item["text"] and message.state == "completed"
+    saved = human.get(session + f"work-items/{issue.pk}/conversation/")
+    assert saved.status_code == 200 and saved.data["messages"][0]["body"] == item["text"]
+    identifier = str(uuid4())
+    assert (
+        human.post(
+            session + f"work-items/{issue.pk}/conversation/",
+            {"id": identifier, "body": "Continue the new attempt", "assets": []},
+            format="json",
+        ).status_code
+        == 201
+    )
+    assert CodexCommand.objects.get(pk=identifier).thread_id == new_chat.pk
+
+
+@pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize("method", ["turn/started", "item/completed"])
 def test_chat_progress_notifications_publish_delivery_state(runtime_case, monkeypatch, method):
     from plane.coordination.codex import runtime as module
@@ -890,6 +962,44 @@ def test_reconciliation_keeps_interrupted_output_incomplete(runtime_case):
     )
     message = snapshot(conversation)["messages"][0]
     assert message["body"] == "Partial reply" and message["state"] == "interrupted"
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("final_status", ["failed", "interrupted"])
+def test_stale_history_does_not_reopen_interrupted_assistant_output(runtime_case, final_status):
+    from plane.coordination.codex.chat import assistant_message, ensure_conversation
+    from plane.db.models.codex import AgentChatMessage
+
+    runtime, _, chat, issue = runtime_case
+    conversation = ensure_conversation(issue)
+    conversation.chat = chat
+    conversation.save()
+    assistant_message(chat, "turn", "partial", "Latest partial reply", final=False)
+    stale = {
+        "id": "turn",
+        "status": "inProgress",
+        "items": [{"type": "agentMessage", "id": "partial", "text": "Older partial"}],
+    }
+    asyncio.run(
+        runtime.notification(
+            "local",
+            {
+                "method": "turn/completed",
+                "params": {"threadId": chat.thread_id, "turn": {"id": "turn", "status": final_status}},
+            },
+        )
+    )
+    asyncio.run(runtime.reconcile_turn(chat, stale))
+    message = AgentChatMessage.objects.get(conversation=conversation)
+    assert message.state == "failed" and message.body == "Latest partial reply"
+    terminal = {
+        "id": "turn",
+        "status": final_status,
+        "items": [{"type": "agentMessage", "id": "partial", "text": "Recovered incomplete reply"}],
+    }
+    asyncio.run(runtime.reconcile_turn(chat, terminal))
+    message.refresh_from_db()
+    assert message.state == final_status and message.body == "Recovered incomplete reply"
 
 
 @pytest.mark.django_db(transaction=True)
