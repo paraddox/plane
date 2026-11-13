@@ -22,7 +22,7 @@ from plane.db.models.api import generate_token
 
 
 @transaction.atomic
-def seed(owner_email, policy_project_id, output):
+def seed(owner_email, policy_project_id, output, *, repository, base_branch, signature_tolerance):
     owner = User.objects.get(email__iexact=owner_email, is_bot=False, is_active=True)
     source = ProjectExecutionPolicy.objects.select_related("project__workspace").get(
         project_id=policy_project_id, enabled=True
@@ -51,10 +51,8 @@ def seed(owner_email, policy_project_id, output):
         project=project,
         defaults={
             "enabled": True,
-            "repositories": source.repositories,
+            "required_checks": source.required_checks,
             "context_references": source.context_references,
-            "credential_lifetime": source.credential_lifetime,
-            "execution_lease": source.execution_lease,
         },
     )
     path = Path(output)
@@ -98,9 +96,10 @@ def seed(owner_email, policy_project_id, output):
         "worker_id": str(agents["worker"].pk),
         "dispatcher_token": raw,
         "dispatcher_credential_id": str(credential.pk),
-        "repository": source.repositories[0]["repository"],
+        "repository": repository,
+        "base_branch": base_branch,
         "http_timeout": settings.COORDINATION_WEBHOOK_TIMEOUT,
-        "signature_tolerance": source.credential_lifetime.total_seconds(),
+        "signature_tolerance": signature_tolerance,
     }
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, "w") as stream:

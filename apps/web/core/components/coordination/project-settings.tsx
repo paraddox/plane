@@ -5,12 +5,13 @@
  */
 
 import { useEffect, useState } from "react";
-import { Bot, Check, Pencil, Plus, RefreshCw, Save, Trash2 } from "lucide-react";
+import { Check, Pencil, RefreshCw, Save } from "lucide-react";
 import useSWR from "swr";
 import { Button } from "@plane/propel/button";
-import type { TExecutionPolicy, TProjectRelease, TRepositoryPolicy } from "@plane/types";
+import type { TExecutionPolicy, TProjectRelease } from "@plane/types";
 import { CoordinationService } from "@/services/coordination.service";
-import { coordinationError, durationSeconds } from "./helpers";
+import { coordinationError } from "./helpers";
+import { ProjectAgents } from "./project-agents";
 
 const service = new CoordinationService();
 const field =
@@ -34,10 +35,8 @@ export function CoordinationProjectSettings({ workspaceSlug, projectId, canAdmin
     mutate: refreshAgents,
   } = useSWR(["coordination-agents", workspaceSlug, projectId], () => service.agents(workspaceSlug, projectId));
   const [enabled, setEnabled] = useState(false);
-  const [repositories, setRepositories] = useState<(TRepositoryPolicy & { localKey: string })[]>([]);
+  const [checks, setChecks] = useState("");
   const [contexts, setContexts] = useState("");
-  const [lifetime, setLifetime] = useState<number | "">("");
-  const [lease, setLease] = useState<number | "">("");
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -52,19 +51,13 @@ export function CoordinationProjectSettings({ workspaceSlug, projectId, canAdmin
   useEffect(() => {
     if (!policy || dirty) return;
     setEnabled(policy.enabled);
-    setRepositories(policy.repositories.map((row) => ({ ...row, localKey: crypto.randomUUID() })));
+    setChecks(policy.required_checks.join("\n"));
     setContexts(policy.context_references.join("\n"));
-    setLifetime(durationSeconds(policy.credential_lifetime));
-    setLease(durationSeconds(policy.execution_lease));
   }, [policy, dirty]);
 
   const change = () => {
     setDirty(true);
     setSaved(false);
-  };
-  const updateRepository = (index: number, values: Partial<TRepositoryPolicy>) => {
-    setRepositories(repositories.map((row, rowIndex) => (rowIndex === index ? { ...row, ...values } : row)));
-    change();
   };
   async function action(operation: () => Promise<unknown>) {
     setBusy(true);
@@ -122,18 +115,14 @@ export function CoordinationProjectSettings({ workspaceSlug, projectId, canAdmin
               void action(async () => {
                 const input: Omit<TExecutionPolicy, "project"> = {
                   enabled,
-                  repositories: repositories.map(({ repository, base_branch, required_checks, merge_method }) => ({
-                    repository,
-                    base_branch,
-                    required_checks,
-                    merge_method,
-                  })),
+                  required_checks: checks
+                    .split("\n")
+                    .map((value) => value.trim())
+                    .filter(Boolean),
                   context_references: contexts
                     .split("\n")
                     .map((value) => value.trim())
                     .filter(Boolean),
-                  credential_lifetime: lifetime === "" ? null : String(lifetime),
-                  execution_lease: lease === "" ? null : String(lease),
                 };
                 await service.savePolicy(workspaceSlug, projectId, input);
                 setDirty(false);
@@ -154,115 +143,18 @@ export function CoordinationProjectSettings({ workspaceSlug, projectId, canAdmin
                 />
                 Agent execution enabled
               </label>
-              <div className="grid gap-4 sm:grid-cols-2">
-                <label className="block space-y-1">
-                  <span>Credential lifetime (seconds)</span>
-                  <input
-                    className={field}
-                    type="number"
-                    min="0"
-                    step="any"
-                    value={lifetime}
-                    required={enabled}
-                    onChange={(event) => {
-                      setLifetime(event.target.value === "" ? "" : Number(event.target.value));
-                      change();
-                    }}
-                  />
-                </label>
-                <label className="block space-y-1">
-                  <span>Execution lease (seconds)</span>
-                  <input
-                    className={field}
-                    type="number"
-                    min="0"
-                    step="any"
-                    value={lease}
-                    required={enabled}
-                    onChange={(event) => {
-                      setLease(event.target.value === "" ? "" : Number(event.target.value));
-                      change();
-                    }}
-                  />
-                </label>
-              </div>
-              <h3 className="text-body-sm-medium">Repositories</h3>
-              {repositories.map((row, index) => (
-                <div key={row.localKey} className="space-y-3 border-b border-subtle pb-4">
-                  <div className="grid min-w-0 gap-3 sm:grid-cols-2">
-                    <label className="block min-w-0 space-y-1">
-                      <span>Repository (owner/name)</span>
-                      <input
-                        className={field}
-                        required
-                        value={row.repository}
-                        onChange={(event) => updateRepository(index, { repository: event.target.value })}
-                      />
-                    </label>
-                    <label className="block min-w-0 space-y-1">
-                      <span>Base branch</span>
-                      <input
-                        className={field}
-                        required
-                        value={row.base_branch}
-                        onChange={(event) => updateRepository(index, { base_branch: event.target.value })}
-                      />
-                    </label>
-                  </div>
-                  <div className="grid min-w-0 gap-3 sm:grid-cols-2">
-                    <label className="block min-w-0 space-y-1">
-                      <span>Required CI checks</span>
-                      <textarea
-                        className={field}
-                        rows={2}
-                        value={row.required_checks.join("\n")}
-                        onChange={(event) =>
-                          updateRepository(index, { required_checks: event.target.value.split("\n") })
-                        }
-                        onBlur={() =>
-                          updateRepository(index, {
-                            required_checks: row.required_checks.map((name) => name.trim()).filter(Boolean),
-                          })
-                        }
-                      />
-                    </label>
-                    <div className="space-y-3">
-                      <button
-                        type="button"
-                        className="grid size-8 place-items-center rounded hover:bg-layer-2"
-                        title="Remove repository"
-                        aria-label={`Remove repository ${index + 1}`}
-                        onClick={() => {
-                          setRepositories(repositories.filter((_, rowIndex) => rowIndex !== index));
-                          change();
-                        }}
-                      >
-                        <Trash2 className="size-4" />
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              ))}
-              <Button
-                type="button"
-                variant="secondary"
-                onClick={() => {
-                  setRepositories([
-                    ...repositories,
-                    {
-                      repository: "",
-                      base_branch: "main",
-                      required_checks: [],
-                      merge_method: "merge",
-                      localKey: crypto.randomUUID(),
-                    },
-                  ]);
-                  change();
-                }}
-              >
-                <Plus className="size-4" />
-                Add repository
-              </Button>
+              <label className="block space-y-1">
+                <span>Required CI checks</span>
+                <textarea
+                  className={field}
+                  rows={2}
+                  value={checks}
+                  onChange={(event) => {
+                    setChecks(event.target.value);
+                    change();
+                  }}
+                />
+              </label>
               <label className="block space-y-1">
                 <span>Context references</span>
                 <textarea
@@ -420,28 +312,14 @@ export function CoordinationProjectSettings({ workspaceSlug, projectId, canAdmin
           </form>
         )}
       </section>
-      <section className="space-y-3 border-t border-subtle pt-5" aria-label="Registered agents">
-        <h2 className="text-body-md-medium">Registered Agents</h2>
-        {!agents ? (
-          <p>Loading agents...</p>
-        ) : !agents.length ? (
-          <p className="text-tertiary">No registered agents</p>
-        ) : (
-          <ul className="divide-y divide-subtle">
-            {agents.map((agent) => (
-              <li key={agent.id} className="flex items-start gap-3 py-3">
-                <Bot className="mt-0.5 size-4 shrink-0" />
-                <div className="min-w-0">
-                  <p className="break-words">
-                    {agent.name || agent.agent} / {agent.role} / {agent.is_active ? "Active" : "Inactive"}
-                  </p>
-                  <p className="font-mono text-caption-sm-regular break-all text-tertiary">{agent.agent}</p>
-                </div>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
+      <ProjectAgents
+        key={`${workspaceSlug}/${projectId}`}
+        workspaceSlug={workspaceSlug}
+        projectId={projectId}
+        canAdmin={canAdmin}
+        agents={agents}
+        onRefresh={refreshAgents}
+      />
     </div>
   );
 }

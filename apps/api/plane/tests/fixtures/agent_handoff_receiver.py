@@ -158,6 +158,7 @@ class Demo:
                     "agent": self.config["worker_id"],
                     "worker_id": "local-handoff-demo:" + issue_id,
                     "repository": self.config["repository"],
+                    "base_branch": self.config["base_branch"],
                 },
                 idempotency="handoff-demo:" + event["id"],
             )

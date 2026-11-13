@@ -47,7 +47,12 @@ def guest_access(execution):
     hidden_run = claim(execution)
     owned_run = dispatcher.post(
         prefix + f"work-items/{owned.pk}/claim/",
-        {"agent": str(worker.pk), "worker_id": "guest-task-worker", "repository": "example/product"},
+        {
+            "agent": str(worker.pk),
+            "worker_id": "guest-task-worker",
+            "repository": "example/product",
+            "base_branch": "main",
+        },
         format="json",
     )
     assert owned_run.status_code == 201, owned_run.data

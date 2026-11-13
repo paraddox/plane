@@ -83,7 +83,7 @@ class FakeGitHub:
 def merge_flow(execution, monkeypatch):
     _, human, project, issue, contract, policy, _, _, _, prefix = execution
     done = State.objects.create(project=project, name="Done", group="completed", color="#00aa00")
-    policy.repositories[0]["required_checks"] = ["tests"]
+    policy.required_checks = ["tests"]
     policy.save()
     run_id = claim(execution)
     agent, credential = worker_client(execution, run_id)
@@ -367,7 +367,12 @@ def test_unknown_provider_outcome_is_fenced_until_reconciled(merge_flow):
     assert (
         dispatcher.post(
             prefix + f"work-items/{issue.pk}/claim/",
-            {"agent": str(worker.pk), "worker_id": "replacement"},
+            {
+                "agent": str(worker.pk),
+                "worker_id": "replacement",
+                "repository": "example/product",
+                "base_branch": "main",
+            },
             format="json",
         ).status_code
         == 409
@@ -659,34 +664,19 @@ def test_earlier_rejection_cannot_clear_an_overlapping_retry_fence(merge_flow, m
 
 
 @pytest.mark.django_db(transaction=True)
-def test_expired_pending_merge_can_be_renewed_only_by_its_dispatcher(merge_flow):
+def test_pending_merge_can_finish_after_idle_without_dispatcher_renewal(merge_flow, monkeypatch):
     execution, agent, run_id, provider, _, _, _ = merge_flow
     dispatcher, _, _, _, _, _, _, _, _, prefix = execution
     advance(merge_flow)
     url = prefix + f"runs/{run_id}/merge/"
     provider.failure = ProviderUnavailable()
     assert agent.post(url, MERGE_INPUT, format="json").status_code == 202
-    AgentRun.objects.filter(pk=run_id).update(lease_expires_at=timezone.now() - timedelta(seconds=1))
-    assert agent.post(url, MERGE_INPUT, format="json").status_code == 403
-    renewed = dispatcher.post(prefix + f"runs/{run_id}/renew/", {}, format="json")
-    assert renewed.status_code == 200, renewed.data
-    assert renewed.data["status"] == "merging"
-    assert AgentRun.objects.get(pk=run_id).lease_expires_at > timezone.now()
-    resumed, _ = worker_client(execution, run_id)
+    later = timezone.now() + timedelta(days=1)
+    monkeypatch.setattr(timezone, "now", lambda: later)
     provider.failure = None
-    assert resumed.post(url, MERGE_INPUT, format="json").status_code == 200
+    assert agent.post(url, MERGE_INPUT, format="json").status_code == 200
     assert AgentRun.objects.filter(contract_id=AgentRun.objects.get(pk=run_id).contract_id).count() == 1
     assert MergeAttempt.objects.filter(run_id=run_id).count() == 1
-
-
-@pytest.mark.django_db(transaction=True)
-def test_expired_active_run_cannot_be_revived_by_renewal(merge_flow):
-    execution, _, run_id, _, _, _, _ = merge_flow
-    dispatcher, _, _, _, _, _, _, _, _, prefix = execution
-    expired_at = timezone.now() - timedelta(seconds=1)
-    AgentRun.objects.filter(pk=run_id).update(lease_expires_at=expired_at)
-    assert dispatcher.post(prefix + f"runs/{run_id}/renew/", {}, format="json").status_code == 403
-    assert AgentRun.objects.get(pk=run_id).lease_expires_at == expired_at
 
 
 @pytest.mark.django_db(transaction=True)

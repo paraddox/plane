@@ -2,11 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
-from datetime import timedelta
-
 from django.db import transaction
-from django.db.models import Q
-from django.utils import timezone
 from django.shortcuts import get_object_or_404
 from drf_spectacular.utils import extend_schema
 from rest_framework import serializers
@@ -18,7 +14,9 @@ from plane.api.middleware.api_authentication import APIKeyAuthentication
 from plane.api.rate_limit import APIKeyRateLimitMixin
 from plane.app.views.base import BaseAPIView
 from plane.db.models import AgentProjectAccess, Issue, ProjectExecutionPolicy, ProjectRelease, WorkItemContract
-from plane.db.models import AgentRun
+from plane.db.models import AgentRun, APIToken
+
+from .agents import create_main_agent, create_dispatcher_key, main_agent_access
 
 from .contracts import (
     AdvanceAuthorizationSerializer,
@@ -36,7 +34,6 @@ from .execution import (
     cancel_execution,
     claim_task,
     issue_execution_credential,
-    renew_execution,
     require_dispatcher,
     handoff_execution,
     refresh_execution,
@@ -163,34 +160,14 @@ class ReleaseDetailEndpoint(CoordinationEndpoint):
         return Response(serializer.data)
 
 
-class RepositorySerializer(serializers.Serializer):
-    repository = serializers.RegexField(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-    base_branch = serializers.CharField(default="main")
-    required_checks = serializers.ListField(child=serializers.CharField(), default=list)
-    merge_method = serializers.ChoiceField(choices=["merge"], default="merge")
-
-
 class ExecutionPolicySerializer(serializers.ModelSerializer):
-    repositories = RepositorySerializer(many=True, required=False)
+    required_checks = serializers.ListField(child=serializers.CharField(), required=False)
     context_references = serializers.ListField(child=serializers.URLField(), required=False)
 
     class Meta:
         model = ProjectExecutionPolicy
-        fields = ["project", "enabled", "repositories", "context_references", "credential_lifetime", "execution_lease"]
+        fields = ["project", "enabled", "required_checks", "context_references"]
         read_only_fields = ["project"]
-
-    def validate(self, attrs):
-        for field in ("credential_lifetime", "execution_lease"):
-            if attrs.get(field) is not None and attrs[field] <= timedelta(0):
-                raise ValidationError({field: "The operator-selected duration must be positive."})
-        repositories = attrs.get("repositories")
-        if repositories and len({entry["repository"] for entry in repositories}) != len(repositories):
-            raise ValidationError({"repositories": "A repository may appear only once."})
-        if attrs.get("enabled", self.instance.enabled if self.instance else False):
-            for name in ("repositories", "credential_lifetime", "execution_lease"):
-                if not attrs.get(name, getattr(self.instance, name, None)):
-                    raise ValidationError({name: "Configure this policy before enabling execution."})
-        return attrs
 
 
 class ExecutionPolicyEndpoint(CoordinationEndpoint):
@@ -245,6 +222,38 @@ class AgentSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+class MainAgentInputSerializer(serializers.Serializer):
+    name = serializers.CharField(max_length=255)
+
+
+class AgentCredentialSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = APIToken
+        fields = ["id", "label", "is_active", "expired_at", "created_at", "last_used"]
+        read_only_fields = fields
+
+
+class IssuedAgentCredentialSerializer(AgentCredentialSerializer):
+    token = serializers.CharField(read_only=True)
+
+    class Meta(AgentCredentialSerializer.Meta):
+        fields = [*AgentCredentialSerializer.Meta.fields, "token"]
+
+
+class MainAgentResponseSerializer(serializers.Serializer):
+    agent = AgentSerializer()
+    credential = IssuedAgentCredentialSerializer()
+
+
+def reject_credential_replay(request):
+    if "Idempotency-Key" in request.headers:
+        raise ValidationError({"Idempotency-Key": "This operation does not store replay responses."})
+
+
+def credential_response(credential, raw):
+    return {**AgentCredentialSerializer(credential).data, "token": raw}
+
+
 class AgentsEndpoint(CoordinationEndpoint):
     serializer_class = AgentSerializer
     queryset = AgentProjectAccess.objects.none()
@@ -256,6 +265,64 @@ class AgentsEndpoint(CoordinationEndpoint):
         return Response(
             AgentSerializer(AgentProjectAccess.objects.filter(project=project).select_related("agent"), many=True).data
         )
+
+    @extend_schema(
+        tags=["Agent Execution"], request=MainAgentInputSerializer, responses={201: MainAgentResponseSerializer}
+    )
+    def post(self, request, slug, project_id):
+        project = self.project(request, write=True, admin=True)
+        reject_credential_replay(request)
+        serializer = MainAgentInputSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        agent, credential, raw = create_main_agent(project, request.user, serializer.validated_data["name"])
+        response = Response(
+            {"agent": AgentSerializer(agent).data, "credential": credential_response(credential, raw)}, status=201
+        )
+        response["Cache-Control"] = "no-store"
+        return response
+
+
+class AgentCredentialsEndpoint(CoordinationEndpoint):
+    serializer_class = AgentCredentialSerializer
+
+    @extend_schema(tags=["Agent Execution"], responses=AgentCredentialSerializer(many=True))
+    def get(self, request, slug, project_id, access_id):
+        project = self.project(request, admin=True)
+        access = main_agent_access(project, access_id)
+        credentials = APIToken.objects.filter(project=project, user=access.agent, purpose="dispatcher")
+        response = Response(AgentCredentialSerializer(credentials, many=True).data)
+        response["Cache-Control"] = "no-store"
+        return response
+
+    @extend_schema(tags=["Agent Execution"], request=None, responses={201: IssuedAgentCredentialSerializer})
+    @transaction.atomic
+    def post(self, request, slug, project_id, access_id):
+        project = self.project(request, write=True, admin=True)
+        reject_credential_replay(request)
+        access = main_agent_access(project, access_id, lock=True)
+        credential, raw = create_dispatcher_key(access, request.user)
+        response = Response(credential_response(credential, raw), status=201)
+        response["Cache-Control"] = "no-store"
+        return response
+
+
+class AgentCredentialDetailEndpoint(CoordinationEndpoint):
+    @extend_schema(tags=["Agent Execution"], request=None, responses={204: None})
+    @transaction.atomic
+    def delete(self, request, slug, project_id, access_id, credential_id):
+        project = self.project(request, write=True, admin=True)
+        access = main_agent_access(project, access_id, lock=True)
+        credential = get_object_or_404(
+            APIToken.objects.select_for_update(),
+            pk=credential_id,
+            project=project,
+            user=access.agent,
+            purpose="dispatcher",
+        )
+        credential.is_active = False
+        credential.updated_by = request.user
+        credential.save(disable_auto_set_user=True, update_fields=["is_active", "updated_by", "updated_at"])
+        return Response(status=204)
 
 
 class MachineAgentsEndpoint(MachineCoordinationMixin, AgentsEndpoint):
@@ -376,16 +443,6 @@ class MachineRunEndpoint(MachineCoordinationMixin, RunEndpoint):
     pass
 
 
-class RenewEndpoint(MachineCoordinationMixin, CoordinationEndpoint):
-    serializer_class = RunSerializer
-    coordination_action = "renew"
-
-    @extend_schema(tags=["Agent Execution"], request=None, responses=RunSerializer)
-    def post(self, request, slug, project_id, run_id):
-        project = self.project(request, write=True)
-        return Response(RunSerializer(renew_execution(request, project, run_id)).data)
-
-
 class HeartbeatEndpoint(MachineCoordinationMixin, CoordinationEndpoint):
     serializer_class = RunSerializer
     coordination_action = "heartbeat"
@@ -424,16 +481,7 @@ class CandidatesEndpoint(MachineCoordinationMixin, CoordinationEndpoint):
             queryset=WorkItemContract.objects.filter(project=project)
             .filter(issue__is_draft=False, issue__archived_at__isnull=True, issue__agent_child__isnull=True)
             .exclude(issue__state__group__in=["completed", "cancelled", "triage"])
-            .filter(
-                Q(status="ready")
-                | Q(
-                    status__in=["in_progress", "awaiting_input", "review"],
-                    runs__status="active",
-                    runs__deleted_at__isnull=True,
-                    runs__handed_off_at__isnull=True,
-                    runs__lease_expires_at__lte=timezone.now(),
-                )
-            )
+            .filter(status="ready")
             .distinct()
             .order_by("created_at", "id"),
             on_results=lambda rows: ContractSerializer(rows, many=True).data,

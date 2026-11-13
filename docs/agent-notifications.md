@@ -15,7 +15,7 @@ worker identity while supplying a distinct `worker_id` for every execution.
 1. The main agent creates a project callback subscription. The default filter is
    `task.ready`, so ordinary feedback does not wake the main agent.
 2. It claims an available task with the registered worker identity, external
-   worker/session identifier and configured repository.
+   worker/session identifier, repository and target branch from its own setup.
 3. It calls `POST runs/{run_id}/handoff/` with `{}`. The response contains `id`,
    a plaintext assignment `token` returned only here, the `run`, and `event_cursor`.
 4. The main agent starts its chosen runtime, securely supplies that assignment
@@ -30,15 +30,16 @@ worker identity while supplying a distinct `worker_id` for every execution.
    ```
 
    This returns `id`, a new execution `token`, and `expired_at`. The worker uses
-   that short-lived token for task writes, questions, uploads, evidence and merge
+   that token for task writes, questions, uploads, evidence and merge
    operations. Refresh rotates execution tokens without revoking the assignment
-   key. It can restore an expired execution lease after a human wait; no main
-   agent is needed. Heartbeats alone still do not renew authority.
+   key. Both keys have no timed expiry; the worker can wait for human feedback
+   without renewing access. Refresh is only needed for initial access, explicit
+   key rotation or acknowledging an edited specification. No main agent is needed.
 
 Assignment keys remain revocable and task/run scoped. Cancellation, confirmed
 merge, revoked parent access, disabled project execution or lost membership close
 the worker's authority. Explicit cancellation/reassignment is required to replace
-a handed-off worker; lease expiry alone cannot silently transfer its task.
+a worker; idle time cannot silently transfer its task.
 Repeating handoff with the owning dispatcher rotates both assignment/execution
 keys and disables old callbacks. Call it again only for deliberate key recovery.
 

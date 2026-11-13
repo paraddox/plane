@@ -13,11 +13,20 @@ the callback protocol, replay and runtime-independent integration example.
 ## Project Setup
 
 1. Apply the database migrations, including PostgreSQL completion guards.
-2. In project settings, open **Agent coordination**. Configure repositories,
-   target branches, required CI check names, context URLs, credential lifetime,
-   and execution lease. Durations are operator choices; execution cannot be
-   enabled without a complete policy. Each project has its own releases.
-3. Register stable agents through the trusted operator command. The responsible
+2. In project settings, open **Agent coordination** and enable execution. Optional
+   required CI check names apply to the project; context URLs and releases are
+   project-local too. Repository access and target branches are configured in the
+   external agent infrastructure, not this page. The dispatcher supplies the
+   repository and target branch when claiming a task.
+3. In **Agent coordination → Registered Agents**, enter a main agent name and
+   select **Create main agent**. A human project administrator gets a new
+   project-scoped bot identity and its API key in a one-time dialog. The key is
+   stored hashed; lists and reloads never return its secret. The key icon beside
+   each main agent opens API-key management to issue additional keys or revoke
+   individual ones. Revoking a key also removes access from workers delegated
+   through that key; it does not revoke other keys for the same main agent.
+
+   Operators may also register identities with the command below. The responsible
    owner must be an active human project administrator:
 
    ```sh
@@ -129,18 +138,17 @@ All paths below are relative to:
 
 ### Dispatcher
 
-| Method | Path                                            | Purpose                                        |
-| ------ | ----------------------------------------------- | ---------------------------------------------- |
-| GET    | `agents/`, `policy/`, `releases/`               | Discover permitted project context             |
-| GET    | `candidates/`                                   | Ready tasks and reclaimable expired executions |
-| GET    | `events/?after={sequence}&per_page={page_size}` | Durable project event feed                     |
-| GET    | `work-items/{issue_id}/contract/`               | Versioned product specification                |
-| POST   | `work-items/{issue_id}/claim/`                  | Atomically claim one task                      |
-| GET    | `runs/{run_id}/`                                | Run metadata, never a recoverable raw key      |
-| POST   | `runs/{run_id}/credentials/`                    | Issue/rotate the worker's execution key        |
-| POST   | `runs/{run_id}/handoff/`                        | Return a durable worker assignment key once    |
-| POST   | `runs/{run_id}/renew/`                          | Extend a still-authorized lease                |
-| POST   | `runs/{run_id}/reconcile/`                      | Observe a pending merge; never initiate one    |
+| Method | Path                                            | Purpose                                     |
+| ------ | ----------------------------------------------- | ------------------------------------------- |
+| GET    | `agents/`, `policy/`, `releases/`               | Discover permitted project context          |
+| GET    | `candidates/`                                   | Open, unclaimed tasks                       |
+| GET    | `events/?after={sequence}&per_page={page_size}` | Durable project event feed                  |
+| GET    | `work-items/{issue_id}/contract/`               | Versioned product specification             |
+| POST   | `work-items/{issue_id}/claim/`                  | Atomically claim one task                   |
+| GET    | `runs/{run_id}/`                                | Run metadata, never a recoverable raw key   |
+| POST   | `runs/{run_id}/credentials/`                    | Issue/rotate the worker's execution key     |
+| POST   | `runs/{run_id}/handoff/`                        | Return a durable worker assignment key once |
+| POST   | `runs/{run_id}/reconcile/`                      | Observe a pending merge; never initiate one |
 
 Claim input:
 
@@ -148,32 +156,29 @@ Claim input:
 {
   "agent": "REGISTERED_WORKER_UUID",
   "worker_id": "infrastructure-worker-instance-id",
-  "repository": "owner/repository"
+  "repository": "owner/repository",
+  "base_branch": "main"
 }
 ```
 
 Claim returns `201` with run metadata. A live competing claim returns `409`.
-Before handoff, expired active runs can be reclaimed from In Progress, Awaiting Input, or Review;
-the new attempt fences old keys and retains relevant questions/child scope.
-A handed-off run cannot be reclaimed just because its execution lease expires;
-the assigned worker can recover its own access after waiting for a human.
-A possibly merged run is never reassigned merely because its lease elapsed.
+Claims do not expire with time. A human must cancel and reopen a task to replace
+its execution; waiting for feedback cannot silently transfer it to another worker.
+A possibly merged run must first be reconciled, never reassigned.
 
 Credential issuance returns `201` with `id`, `token`, and `expired_at`, with
 `Cache-Control: no-store`. Give that distinct key only to the named execution.
-Its deadline cannot exceed the configured lifetime or current execution lease.
+`expired_at` is null: worker authority follows the open work item, not a timer.
 Rotation revokes older run keys. `Idempotency-Key` is rejected for this endpoint
 so plaintext credentials never enter the replay-response store. If the response
 is lost, issue a replacement; the previous key is revoked.
 
-Before handoff, dispatchers renew leases and rotate credentials while authorized and before expiry. A fenced
-pending merge cannot be reassigned: its owning dispatcher may restore that same
-run's expired lease, then rotate its execution credential so the assigned agent
-can finish recovery. This does not revive expired active runs, bypass revoked
-access, or let workers renew themselves. Worker heartbeats do not extend their
-own authority. After handoff, the separate assignment key calls
-`runs/{run_id}/refresh/` with `expected_revision` to extend the same run's lease
-and receive a fresh short-lived execution key, without main-agent calls.
+No credential renewal or execution lease is required. Heartbeats report liveness
+only. After handoff, the separate assignment key calls `runs/{run_id}/refresh/`
+with `expected_revision` to acknowledge the current specification and obtain or
+rotate an execution key, without main-agent calls. Unchanged specifications need
+no periodic refresh. Closed or cancelled tasks revoke all their run keys;
+reopening does not revive those keys.
 Disabled execution, removed
 membership/identity access, parent-key revocation/expiry, cancellation, stale
 specs, and confirmed completion fence execution keys. Authentication reads the
@@ -285,7 +290,7 @@ Merge input must name the exact current intent:
 ```
 
 The server checks ownership/delegation, spec/code versions, human authorization,
-required reviews, questions, children, evidence, repository/base policy, PR
+required reviews, questions, children, evidence, the claimed repository/base, PR
 metadata, and current required CI checks. It persists a merge fence before the
 remote write. The provider operation names the configured base branch and exact
 head SHA; a PR retargeting race cannot redirect it to a different branch.

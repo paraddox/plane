@@ -21,7 +21,7 @@ def test_reviewed_delivery_through_real_auth_database_and_github_http(execution,
     session = prefix.replace("/api/v1/", "/api/", 1)
     settings.COORDINATION_GITHUB_INSTALLATIONS = json.dumps({str(project.pk): {"example/product": 42}})
     done = State.objects.create(project=project, name="Done", group="completed", color="#777777")
-    policy.repositories[0]["required_checks"] = ["tests"]
+    policy.required_checks = ["tests"]
     policy.save()
     reviewer = User.objects.create(email="reviewer@delivery.test", username="reviewer")
     WorkspaceMember.objects.create(workspace=project.workspace, member=reviewer, role=15)
