@@ -1,6 +1,6 @@
 import asyncio
 import json
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
 
 import pytest
@@ -41,7 +41,7 @@ def runtime_case(execution, tmp_path):
     )
     cursor = CoordinationEvent.objects.filter(project=project).order_by("-sequence").first().sequence
     CodexProject.objects.create(project=project, event_cursor=cursor)
-    runtime.clients["local"] = AsyncMock(socket=object())
+    runtime.clients["local"] = AsyncMock(socket=object(), ready=True)
     yield runtime, worker, chat, issue
     asyncio.run(runtime.api.aclose())
 
@@ -117,6 +117,157 @@ def test_rpc_disconnect_releases_pending_requests():
         assert not client.pending
 
     asyncio.run(exercise())
+
+
+def test_rpc_send_disconnect_is_a_recoverable_connection_error():
+    from websockets.exceptions import ConnectionClosed
+
+    async def exercise():
+        client = CodexClient({}, AsyncMock(), AsyncMock(), AsyncMock())
+        client.socket = AsyncMock()
+        client.socket.send.side_effect = ConnectionClosed(None, None)
+        with pytest.raises(ConnectionError):
+            await client.request("turn/start", {})
+        assert not client.pending
+
+    asyncio.run(exercise())
+
+
+def test_native_client_is_ready_only_after_session_reconciliation(monkeypatch):
+    from plane.coordination.codex import client as module
+
+    async def exercise():
+        entered, release, restored, disconnected = (asyncio.Event() for _ in range(4))
+        socket = AsyncMock()
+
+        async def connections(*args, **kwargs):
+            yield socket
+
+        async def reconnect():
+            entered.set()
+            await release.wait()
+            restored.set()
+
+        monkeypatch.setattr(module, "connect", connections)
+        client = CodexClient({"url": "ws://host"}, AsyncMock(), reconnect, AsyncMock())
+        client.request = AsyncMock(return_value={})
+        client.read = AsyncMock(side_effect=disconnected.wait)
+        task = asyncio.create_task(client.run())
+        try:
+            await entered.wait()
+            assert client.socket is socket
+            assert not client.ready
+            release.set()
+            await restored.wait()
+            assert client.ready
+        finally:
+            release.set()
+            disconnected.set()
+            await task
+        assert not client.ready
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.django_db(transaction=True)
+def test_queued_work_waits_until_host_reconciliation_finishes(runtime_case):
+    runtime, worker, _, _ = runtime_case
+    worker.state = "idle"
+    worker.save(update_fields=["state"])
+    command = CodexCommand.objects.create(thread=worker, text="Wait for restored sessions")
+    runtime.clients["local"].ready = False
+    runtime.clients["local"].request.return_value = {"turn": {"id": "unexpected"}}
+    asyncio.run(runtime.pump())
+    command.refresh_from_db()
+    assert command.state == "queued"
+    runtime.clients["local"].request.assert_not_awaited()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_reconnect_restores_active_turn_before_cancelling_work(runtime_case):
+    runtime, worker, _, _ = runtime_case
+    worker.state, worker.active_turn = "offline", ""
+    worker.save(update_fields=["state", "active_turn"])
+    command = CodexCommand.objects.create(thread=worker, text="Accepted before disconnect", state="submitting")
+
+    async def history(thread_id):
+        if thread_id == "worker":
+            yield {
+                "id": "accepted",
+                "status": "inProgress",
+                "items": [{"type": "userMessage", "clientId": str(command.pk)}],
+            }
+
+    async def request(method, params):
+        if method == "thread/read":
+            return {"thread": {"status": {"type": "active" if params["threadId"] == "worker" else "idle"}}}
+        return {}
+
+    runtime.clients["local"].history = history
+    runtime.clients["local"].request.side_effect = request
+    asyncio.run(runtime.reconnect("local"))
+    worker.refresh_from_db()
+    command.refresh_from_db()
+    assert command.state == "sent"
+    assert worker.state == "busy" and worker.active_turn == "accepted"
+    worker.run.status = "cancelled"
+    worker.run.save(update_fields=["status"])
+    asyncio.run(runtime.pump())
+    calls = runtime.clients["local"].request.await_args_list
+    assert any(call.args == ("turn/interrupt", {"threadId": "worker", "turnId": "accepted"}) for call in calls)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_reconnect_publishes_online_state_to_open_chats(runtime_case, monkeypatch):
+    from plane.coordination.codex import runtime as module
+
+    runtime, worker, chat, _ = runtime_case
+    CodexThread.objects.filter(pk__in=[worker.pk, chat.pk]).update(state="offline")
+
+    async def history(thread_id):
+        if False:
+            yield
+
+    runtime.clients["local"].history = history
+    runtime.clients["local"].request.return_value = {"thread": {"status": {"type": "idle"}}}
+    publish = Mock()
+    monkeypatch.setattr(module, "wake", publish)
+    asyncio.run(runtime.reconnect("local"))
+    publish.assert_called_once_with()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_reconnect_does_not_overwrite_a_concurrent_turn_completion(runtime_case):
+    runtime, worker, _, _ = runtime_case
+    command = CodexCommand.objects.create(thread=worker, text="Already running", state="sent", turn_id="working")
+
+    async def history(thread_id):
+        if thread_id == "worker":
+            yield {
+                "id": "working",
+                "status": "inProgress",
+                "items": [{"type": "userMessage", "clientId": str(command.pk)}],
+            }
+
+    async def request(method, params):
+        if method == "thread/read" and params["threadId"] == "worker":
+            await runtime.notification(
+                "local",
+                {
+                    "method": "turn/completed",
+                    "params": {"threadId": "worker", "turn": {"id": "working", "status": "completed"}},
+                },
+            )
+            return {"thread": {"status": {"type": "active"}}}
+        return {"thread": {"status": {"type": "idle"}}}
+
+    runtime.clients["local"].history = history
+    runtime.clients["local"].request.side_effect = request
+    asyncio.run(runtime.reconnect("local"))
+    worker.refresh_from_db()
+    command.refresh_from_db()
+    assert command.state == "completed"
+    assert worker.state == "idle" and worker.active_turn == ""
 
 
 def test_history_reads_all_pages_without_replaying_messages():

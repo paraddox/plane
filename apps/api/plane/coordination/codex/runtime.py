@@ -162,6 +162,7 @@ class Runtime:
             CodexThread.objects.filter(runtime_id=runtime_id, project_id__in=self.projects).exclude(state="archived")
         )
         for thread in threads:
+            await db(CodexThread.objects.filter(pk=thread.pk).update)(state="offline")
             try:
                 if not thread.thread_id:
                     await self.start(thread)
@@ -173,6 +174,8 @@ class Runtime:
                 await client.request("thread/resume", resume)
                 async for turn in client.history(thread.thread_id):
                     await self.reconcile_turn(thread, turn)
+                    if turn["status"] == "inProgress":
+                        thread.active_turn = turn["id"]
                 result = await client.request("thread/read", {"threadId": thread.thread_id})
                 state = result["thread"]["status"]["type"]
                 thread.state = "busy" if state == "active" else "idle"
@@ -186,10 +189,14 @@ class Runtime:
                     thread.error = (
                         "A turn submission could not be reconciled. Operator attention is required before retrying."
                     )
-                await db(thread.save)(update_fields=["state", "active_turn", "error"])
+                # Live turn notifications take precedence over an older history/status response.
+                await db(CodexThread.objects.filter(pk=thread.pk, state="offline").update)(
+                    state=thread.state, active_turn=thread.active_turn, error=thread.error
+                )
             except (RPCError, ValueError) as error:
                 thread.state, thread.error = "needs_attention", str(error)
                 await db(thread.save)(update_fields=["state", "error"])
+        await db(wake)()
         self.woken.set()
 
     async def offline(self, runtime_id):
@@ -538,7 +545,7 @@ class Runtime:
             if str(thread.project_id) not in self.projects:
                 continue
             client = self.clients.get(thread.runtime_id)
-            if not client or not client.socket:
+            if not client or not client.ready:
                 continue
             if thread.run_id and (
                 thread.run.status not in ("active", "merging") or is_closed(thread.run.contract.issue)

@@ -20,6 +20,7 @@ class CodexClient:
         self.connected = connected
         self.disconnected = disconnected
         self.socket = None
+        self.ready = False
         self.pending = {}
         self.tasks = set()
 
@@ -32,6 +33,9 @@ class CodexClient:
         try:
             await self.socket.send(json.dumps({"id": identifier, "method": method, "params": params}))
             return await future
+        except ConnectionClosed as error:
+            self.ready = False
+            raise ConnectionError("Codex connection lost; reconcile delivery") from error
         finally:
             self.pending.pop(identifier, None)
 
@@ -45,6 +49,7 @@ class CodexClient:
         try:
             await self.receive()
         finally:
+            self.ready = False
             for future in self.pending.values():
                 if not future.done():
                     future.set_exception(ConnectionError("Codex connection lost; reconcile delivery"))
@@ -62,6 +67,10 @@ class CodexClient:
             else:
                 await self.handler(message)
 
+    async def restore(self):
+        await self.connected()
+        self.ready = True
+
     async def run(self):
         token = os.environ[self.config["token_env"]] if self.config.get("token_env") else None
         headers = {"Authorization": f"Bearer {token}"} if token else {}
@@ -76,13 +85,14 @@ class CodexClient:
                     {"clientInfo": {"name": "plane", "version": "1"}, "capabilities": {"experimentalApi": True}},
                 )
                 await socket.send(json.dumps({"method": "initialized"}))
-                startup = asyncio.create_task(self.connected())
+                startup = asyncio.create_task(self.restore())
                 done, _ = await asyncio.wait([startup, reader], return_when=asyncio.FIRST_EXCEPTION)
                 for task in done:
                     task.result()
             except (ConnectionClosed, ConnectionError):
                 pass
             finally:
+                self.ready = False
                 self.socket = None
                 for future in self.pending.values():
                     if not future.done():
