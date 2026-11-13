@@ -738,6 +738,114 @@ def test_attachment_download_uses_scoped_api_and_native_host_filesystem(runtime_
 
 
 @pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("failure_stage", ["reservation", "storage", "confirmation"])
+def test_file_sharing_resumes_partial_upload_without_duplicate_assets(runtime_api_case, monkeypatch, failure_stage):
+    import httpx
+    from asgiref.sync import sync_to_async
+    from plane.coordination.codex.chat import ensure_conversation
+    from plane.db.models import FileAsset
+    from plane.db.models.codex import AgentChatMessage
+
+    runtime, worker, chat, issue = runtime_api_case
+    conversation = ensure_conversation(issue)
+    conversation.chat = chat
+    conversation.save()
+    identifier = str(uuid4())
+    values = {"message_id": identifier, "path": "/tmp/verification.txt", "text": "Verification notes"}
+    runtime.clients["local"].request.return_value = {"dataBase64": "cHJldmlldw=="}
+    storage = Mock()
+    storage.generate_presigned_post.return_value = {"url": "http://storage.test/upload", "fields": {}}
+    monkeypatch.setattr("plane.api.views.issue.S3Storage", Mock(return_value=storage))
+    api_call = runtime.api_call
+    failed = False
+
+    async def interrupted_call(project, method, path, data=None, token=None):
+        nonlocal failed
+        result = await api_call(project, method, path, data, token)
+        if not failed and (
+            (failure_stage == "reservation" and method == "POST" and path.endswith("/attachments/"))
+            or (failure_stage == "confirmation" and method == "PATCH")
+        ):
+            failed = True
+            raise ConnectionError("Upload response lost after the API committed")
+        return result
+
+    async def upload(*args, **kwargs):
+        nonlocal failed
+        status = 204
+        if failure_stage == "storage" and not failed:
+            failed, status = True, 503
+        return httpx.Response(status, request=httpx.Request("POST", args[0]))
+
+    runtime.api_call = interrupted_call
+    runtime.api.post = AsyncMock(side_effect=upload)
+
+    async def exercise():
+        await runtime.tool(worker, {"action": "acknowledge_spec", "args": {"expected_revision": 2}})
+        with pytest.raises((ConnectionError, httpx.HTTPStatusError)):
+            await runtime.tool(worker, {"action": "share_file", "args": values})
+        assert await sync_to_async(FileAsset.objects.filter(external_id=identifier).count)() == 1
+        assert not await sync_to_async(AgentChatMessage.objects.filter(pk=identifier).exists)()
+        runtime.credentials.clear()
+        result = await runtime.tool(worker, {"action": "share_file", "args": values})
+        assert result["shared"] and result["message_id"] == identifier
+        assert (await runtime.tool(worker, {"action": "share_file", "args": values}))["shared"]
+
+    asyncio.run(exercise())
+    asset = FileAsset.objects.get(external_id=identifier)
+    assert asset.is_uploaded and str(asset.agent_run_id) == str(worker.run_id)
+    message = AgentChatMessage.objects.get(pk=identifier)
+    assert message.body == values["text"] and list(message.assets.all()) == [asset]
+    assert runtime.api.post.await_count == (2 if failure_stage == "storage" else 1)
+    assert runtime.clients["local"].request.await_count == (1 if failure_stage == "confirmation" else 2)
+    assert {call.kwargs["object_name"] for call in storage.generate_presigned_post.call_args_list} == {asset.asset.name}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("scope", ["other_issue", "human_upload", "other_run", "deleted", "revoked_key"])
+def test_upload_resume_preserves_execution_ownership_checks(execution, monkeypatch, scope):
+    from plane.db.models import APIToken, FileAsset, Issue
+    from .test_coordination_execution import worker_client
+
+    _, _, project, issue, _, _, _, worker, _, _ = execution
+    run_id = claim(execution)
+    client, _ = worker_client(execution, run_id)
+    asset = FileAsset(
+        project=project,
+        workspace=project.workspace,
+        issue=issue,
+        agent_run_id=run_id,
+        created_by=worker,
+        entity_type=FileAsset.EntityTypeContext.ISSUE_ATTACHMENT,
+        asset="synthetic/verification.txt",
+        size=7,
+        attributes={"name": "verification.txt", "type": "text/plain", "size": 7},
+    )
+    if scope == "other_issue":
+        asset.issue = Issue.objects.create(project=project, name="Not assigned")
+    elif scope == "human_upload":
+        asset.created_by = issue.created_by
+    elif scope == "other_run":
+        asset.agent_run_id = None
+    elif scope == "deleted":
+        asset.is_deleted = True
+    else:
+        APIToken.objects.filter(agent_run_id=run_id, purpose="execution").update(is_active=False)
+    asset.save(disable_auto_set_user=True)
+    storage = Mock()
+    monkeypatch.setattr("plane.api.views.issue.S3Storage", storage)
+    path = (
+        f"/api/v1/workspaces/{project.workspace.slug}/projects/{project.pk}/"
+        f"work-items/{issue.pk}/attachments/{asset.pk}/"
+    )
+    response = client.post(path, {}, format="json")
+    assert response.status_code == (404 if scope == "deleted" else 403), response.data
+    storage.assert_not_called()
+    asset.refresh_from_db()
+    assert not asset.is_uploaded
+
+
+@pytest.mark.django_db(transaction=True)
 def test_turn_start_error_reconciles_an_accepted_turn_without_repeating_it(runtime_case):
     from plane.coordination.codex.client import RPCError
 

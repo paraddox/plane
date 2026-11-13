@@ -464,34 +464,50 @@ class Runtime:
         path = PurePosixPath(values["path"])
         if not path.is_absolute():
             raise ValueError("Use an absolute path on the owning Codex host")
-        result = await self.clients[thread.runtime_id].request("fs/readFile", {"path": str(path)})
-        content = base64.b64decode(result["dataBase64"], validate=True)
         token = await self.task_token(thread)
         config = self.project(thread)
         issue_id = await db(lambda: AgentRun.objects.get(pk=thread.run_id).contract.issue_id)()
         prefix = f"work-items/{issue_id}/attachments/"
-        mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-        upload = await self.api_call(
-            config,
-            "POST",
-            prefix,
-            {
-                "name": path.name,
-                "type": mime,
-                "size": len(content),
-                "external_id": str(identifier),
-                "external_source": "codex-conversation",
-            },
-            token=token,
-        )
-        # Storage presigned fields, not the Plane credential, authorize this separate request.
-        response = await self.api.post(
-            upload["upload_data"]["url"],
-            data=upload["upload_data"]["fields"],
-            files={"file": (path.name, content, mime)},
-        )
-        response.raise_for_status()
-        await self.api_call(config, "PATCH", prefix + f"{upload['asset_id']}/", {}, token=token)
+        asset_id = await db(
+            lambda: (
+                FileAsset.objects.filter(
+                    agent_run_id=thread.run_id,
+                    issue_id=issue_id,
+                    external_id=str(identifier),
+                    external_source="codex-conversation",
+                    is_deleted=False,
+                )
+                .values_list("pk", flat=True)
+                .first()
+            )
+        )()
+        upload = await self.api_call(config, "POST", prefix + f"{asset_id}/", {}, token=token) if asset_id else None
+        if upload is None or not upload["is_uploaded"]:
+            result = await self.clients[thread.runtime_id].request("fs/readFile", {"path": str(path)})
+            content = base64.b64decode(result["dataBase64"], validate=True)
+            mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+            if upload is None:
+                upload = await self.api_call(
+                    config,
+                    "POST",
+                    prefix,
+                    {
+                        "name": path.name,
+                        "type": mime,
+                        "size": len(content),
+                        "external_id": str(identifier),
+                        "external_source": "codex-conversation",
+                    },
+                    token=token,
+                )
+            # Storage presigned fields, not the Plane credential, authorize this separate request.
+            response = await self.api.post(
+                upload["upload_data"]["url"],
+                data=upload["upload_data"]["fields"],
+                files={"file": (path.name, content, mime)},
+            )
+            response.raise_for_status()
+            await self.api_call(config, "PATCH", prefix + f"{upload['asset_id']}/", {}, token=token)
         asset = await db(FileAsset.objects.get)(pk=upload["asset_id"], issue_id=issue_id, is_uploaded=True)
         message = await db(share_file)(thread, identifier, asset, values.get("text", ""))
         return {"message_id": str(message.pk), "asset_id": str(asset.pk), "shared": True}

@@ -114,6 +114,10 @@ automatically retried. An unavailable/lost session is shown as such, never rebui
 from the transcript. Queued feedback, delivered turns and worker acknowledgement
 are separate states.
 
+Retry `share_file` with the same `message_id` after an upload failure. The connector
+resumes the reserved attachment and preserves already confirmed uploads, producing
+one attachment and one chat card even if an API response was lost.
+
 Closing/cancelling a run rejects further chat work and archives its task threads.
 The project overseer remains available. Offline hosts retain pending archive work;
 execution revocation does not wait for transcript delivery. Closed conversations
