@@ -86,6 +86,11 @@ tool. It claims the task through the existing API and creates independent
 implementation and chat threads for that run. Subsequent answers, attachments,
 comments and specification/review changes go directly to the task pair.
 
+On connector startup, incomplete handoffs already claimed by that configured
+worker and dispatcher are completed from Plane's durable run state. Existing
+thread IDs and initial commands are preserved. Runs from other workers or keys,
+and runs whose authority has been revoked, are not adopted.
+
 Open **Agent conversation** on a work item to chat. Messages live outside Activity
 and comments. Attachments are ordinary work-item assets and remain linked by ID.
 The browser receives persisted snapshots over SSE; reconnecting does not require

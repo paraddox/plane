@@ -82,6 +82,123 @@ def runtime_api_case(runtime_case, execution):
     return runtime, worker, chat, issue
 
 
+@pytest.fixture
+def runtime_startup_case(runtime_api_case, execution, monkeypatch, tmp_path):
+    runtime, worker, _, issue = runtime_api_case
+    config = runtime.project(worker)
+    config.data.update(
+        runtime="local",
+        worker_id=str(execution[7].pk),
+        dispatcher_key_env="PLANE_TEST_DISPATCHER",
+        placement={role: {"cwd": str(tmp_path)} for role in ("overseer", "implementation", "chat")},
+    )
+    monkeypatch.setenv("PLANE_TEST_DISPATCHER", execution[0]._credentials["HTTP_X_API_KEY"])
+    run = worker.run
+    run.worker_id = f"codex:{issue.pk}"
+    run.save(update_fields=["worker_id"])
+    CodexThread.objects.filter(run=run).delete()
+    runtime.clients["local"].socket = None
+    return runtime, config, run, issue
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("saved_roles", [(), ("implementation",), ("implementation", "chat")])
+def test_startup_finishes_interrupted_handoff_without_restarting_saved_sessions(runtime_startup_case, saved_roles):
+    from plane.db.models.codex import AgentConversation
+
+    runtime, config, run, issue = runtime_startup_case
+    addresses = {}
+    for role in saved_roles:
+        thread = asyncio.run(runtime.binding(config, issue.project, role, run))
+        thread.thread_id, thread.state = f"saved-{role}", "idle"
+        thread.save(update_fields=["thread_id", "state"])
+        addresses[role] = thread.thread_id
+        if role == "implementation":
+            CodexCommand.objects.create(
+                thread=thread,
+                event=CoordinationEvent.objects.filter(issue=issue).first(),
+                text="Feedback queued during the unfinished handoff",
+            )
+    asyncio.run(runtime.setup())
+    worker = CodexThread.objects.get(run=run, role="implementation")
+    chat = CodexThread.objects.get(run=run, role="chat")
+    assert AgentConversation.objects.get(issue=issue).chat_id == chat.pk
+    assert worker.commands.filter(event__isnull=True, sender__isnull=True, message__isnull=True).count() == 1
+    assert chat.commands.count() == 1
+    asyncio.run(runtime.setup())
+    assert CodexThread.objects.filter(run=run).count() == 2
+    assert worker.commands.filter(event__isnull=True, sender__isnull=True, message__isnull=True).count() == 1
+    for thread in (worker, chat):
+        if thread.role in addresses:
+            thread.refresh_from_db()
+            assert thread.thread_id == addresses[thread.role]
+    runtime.clients["local"].request.assert_not_awaited()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_startup_completes_a_claim_stopped_before_handoff(runtime_startup_case, execution):
+    from plane.db.models import AgentRun, State
+    from plane.db.models.codex import AgentConversation
+
+    runtime, config, previous, issue = runtime_startup_case
+    dispatcher, human, project, _, _, _, _, worker, _, prefix = execution
+    session = prefix.replace("/api/v1/", "/api/", 1)
+    assert human.post(session + f"runs/{previous.pk}/cancel/", {}, format="json").status_code == 200
+    state = State.objects.get(project=project, name="Todo")
+    assert (
+        human.patch(
+            f"/api/workspaces/{project.workspace.slug}/projects/{project.pk}/issues/{issue.pk}/",
+            {"state_id": str(state.pk)},
+            format="json",
+        ).status_code
+        == 200
+    )
+    response = dispatcher.post(
+        prefix + f"work-items/{issue.pk}/claim/",
+        {
+            "agent": str(worker.pk),
+            "worker_id": f"codex:{issue.pk}",
+            "repository": "example/product",
+            "base_branch": "main",
+        },
+        format="json",
+    )
+    assert response.status_code == 201, response.data
+    run = AgentRun.objects.get(pk=response.data["id"])
+    assert run.handed_off_at is None
+    asyncio.run(runtime.setup())
+    run.refresh_from_db()
+    assert run.handed_off_at is not None
+    assert CodexThread.objects.filter(run=run).count() == 2
+    assert AgentConversation.objects.get(issue=issue).chat.run_id == run.pk
+    assert run.credentials.filter(purpose="assignment", is_active=True).count() == 1
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("reason", ["other_runtime", "other_dispatcher", "revoked_dispatcher"])
+def test_startup_does_not_adopt_unowned_or_unauthorized_runs(runtime_startup_case, reason, monkeypatch):
+    from plane.db.models import APIToken
+
+    runtime, _, run, _ = runtime_startup_case
+    if reason == "other_runtime":
+        run.worker_id = "external-worker"
+        run.save(update_fields=["worker_id"])
+    elif reason == "other_dispatcher":
+        APIToken.objects.create(
+            user=run.dispatcher.user,
+            project=run.project,
+            workspace=run.project.workspace,
+            purpose="dispatcher",
+            token="other-configured-dispatcher-key",
+        )
+        monkeypatch.setenv("PLANE_TEST_DISPATCHER", "other-configured-dispatcher-key")
+    else:
+        run.dispatcher.is_active = False
+        run.dispatcher.save(update_fields=["is_active"])
+    asyncio.run(runtime.setup())
+    assert not CodexThread.objects.filter(run=run).exists()
+
+
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize("role", ["implementation", "chat"])
 def test_revised_task_context_can_be_read_before_explicit_execution_acknowledgement(runtime_api_case, role):

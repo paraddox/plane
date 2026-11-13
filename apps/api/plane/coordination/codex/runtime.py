@@ -10,10 +10,12 @@ import psycopg
 from asgiref.sync import sync_to_async
 from django.db import transaction
 from django.db.models import Q
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import SAFE_METHODS
 
 from plane.db.models import AgentRun, CoordinationEvent, Project, FileAsset
-from plane.db.models.codex import AgentChatMessage, CodexCommand, CodexProject, CodexThread
+from plane.db.models.api import hash_api_token
+from plane.db.models.codex import AgentConversation, AgentChatMessage, CodexCommand, CodexProject, CodexThread
 from plane.coordination.notifications import WORKER_EVENT_TYPES
 from .chat import assistant_message, ensure_conversation, is_closed, share_file
 from .client import CodexClient, RPCError
@@ -110,6 +112,39 @@ class Runtime:
                 .exists
             )():
                 raise ValueError("Project threads span runtimes. Explicitly migrate or archive them before starting.")
+            for issue_id in await self.pending_handoffs(config, project):
+                await self.dispatch(overseer, issue_id)
+
+    @db
+    def pending_handoffs(self, config, project):
+        from plane.coordination.execution import validate_live_run
+
+        runs = AgentRun.objects.filter(
+            project=project,
+            agent_id=config.data["worker_id"],
+            dispatcher__token=hash_api_token(config.key),
+            status__in=["active", "merging"],
+        ).select_related("contract__issue__state", "project__workspace", "agent", "dispatcher__user")
+        pending = []
+        for run in runs:
+            if run.worker_id != f"codex:{run.contract.issue_id}":
+                continue
+            threads = {thread.role: thread for thread in CodexThread.objects.filter(run=run)}
+            worker, chat = threads.get("implementation"), threads.get("chat")
+            if (
+                run.handed_off_at
+                and worker
+                and chat
+                and worker.commands.filter(event__isnull=True, sender__isnull=True, message__isnull=True).exists()
+                and AgentConversation.objects.filter(issue_id=run.contract.issue_id, chat=chat).exists()
+            ):
+                continue
+            try:
+                validate_live_run(run, assignment=bool(run.handed_off_at))
+            except PermissionDenied:
+                continue
+            pending.append(run.contract.issue_id)
+        return pending
 
     async def binding(self, config, project, role, run=None):
         placement = config.placement(role)
@@ -261,7 +296,7 @@ class Runtime:
             conversation = ensure_conversation(run.contract.issue)
             conversation.chat = chat
             conversation.save(update_fields=["chat"])
-            if not worker.commands.exists():
+            if not worker.commands.filter(event__isnull=True, sender__isnull=True, message__isnull=True).exists():
                 CodexCommand.objects.create(
                     thread=worker,
                     text=f"Implement Plane work item {issue_id}. Run {run.pk}. "
