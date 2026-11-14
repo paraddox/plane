@@ -590,27 +590,34 @@ class Runtime:
         elif method == "item/completed" and params["item"]["type"] == "userMessage":
             identifier = params["item"].get("clientId")
             if identifier:
-                await db(thread.commands.filter(pk=identifier, state__in=["queued", "submitting", "uncertain"]).update)(
+                pending_states = ["queued", "submitting", "uncertain"]
+                await db(thread.commands.filter(pk=identifier, state__in=pending_states).update)(
                     state="sent", turn_id=params["turnId"]
                 )
-                await db(AgentChatMessage.objects.filter(pk=identifier).exclude(state="completed").update)(
+                await db(AgentChatMessage.objects.filter(pk=identifier, state__in=pending_states).update)(
                     state="sent", turn_id=params["turnId"]
                 )
                 await db(wake)()
         elif method == "turn/started":
             if connection is not None and connection is not self.clients[runtime_id].socket:
                 return
-            await db(CodexThread.objects.filter(pk=thread.pk).update)(state="busy", active_turn=params["turn"]["id"])
+            await db(CodexThread.objects.filter(pk=thread.pk).exclude(state="archived").update)(
+                state="busy", active_turn=params["turn"]["id"]
+            )
             await db(wake)()
         elif method == "turn/completed":
             turn = params["turn"]
             state = "completed" if turn["status"] == "completed" else "failed"
             await db(thread.commands.filter(turn_id=turn["id"], state="sent").update)(state=state)
             await db(
-                AgentChatMessage.objects.filter(thread=thread, turn_id=turn["id"]).exclude(state="completed").update
+                AgentChatMessage.objects.filter(
+                    thread=thread,
+                    turn_id=turn["id"],
+                    state__in=["queued", "submitting", "sent", "uncertain", "streaming"],
+                ).update
             )(state=state)
             if connection is None or connection is self.clients[runtime_id].socket:
-                await db(CodexThread.objects.filter(pk=thread.pk).update)(
+                await db(CodexThread.objects.filter(pk=thread.pk).exclude(state="archived").update)(
                     state="idle",
                     active_turn="",
                     error=turn.get("error", {}).get("message", "") if turn.get("error") else "",
@@ -694,10 +701,25 @@ class Runtime:
                     await db(wake)()
                 if not client or not client.ready:
                     continue
+                interrupt_error = None
                 if thread.active_turn:
-                    await client.request("turn/interrupt", {"threadId": thread.thread_id, "turnId": thread.active_turn})
+                    try:
+                        await client.request(
+                            "turn/interrupt", {"threadId": thread.thread_id, "turnId": thread.active_turn}
+                        )
+                    except RPCError as error:
+                        interrupt_error = error
+                # Interrupt acceptance does not prove that the final transcript has been persisted.
+                unfinished = False
+                async for turn in client.history(thread.thread_id):
+                    await self.reconcile_turn(thread, turn)
+                    unfinished |= turn["status"] == "inProgress"
+                if unfinished:
+                    if interrupt_error:
+                        raise interrupt_error
+                    continue
                 await client.request("thread/archive", {"threadId": thread.thread_id})
-                await db(CodexThread.objects.filter(pk=thread.pk).update)(state="archived")
+                await db(CodexThread.objects.filter(pk=thread.pk).update)(state="archived", active_turn="")
                 await db(wake)()
                 continue
             if not client or not client.ready:

@@ -42,6 +42,12 @@ def runtime_case(execution, tmp_path):
     cursor = CoordinationEvent.objects.filter(project=project).order_by("-sequence").first().sequence
     CodexProject.objects.create(project=project, event_cursor=cursor)
     runtime.clients["local"] = AsyncMock(socket=object(), ready=True)
+
+    async def empty_history(thread_id):
+        if False:
+            yield
+
+    runtime.clients["local"].history = empty_history
     yield runtime, worker, chat, issue
     asyncio.run(runtime.api.aclose())
 
@@ -682,6 +688,149 @@ def test_terminal_task_archives_task_threads_not_project(runtime_case):
     assert methods.count("turn/interrupt") == 1
 
 
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("status", ["completed", "interrupted", "failed"])
+@pytest.mark.parametrize("interrupt_finished", [False, True])
+def test_closure_recovers_final_chat_history_before_marking_it_archived(runtime_case, status, interrupt_finished):
+    from plane.coordination.codex.chat import assistant_message, ensure_conversation, post_message
+    from plane.coordination.codex.client import RPCError
+    from plane.db.models.codex import AgentChatMessage
+
+    runtime, worker, chat, issue = runtime_case
+    conversation = ensure_conversation(issue)
+    conversation.chat = chat
+    conversation.save()
+    message = post_message(issue, issue.created_by, uuid4(), "Finish the explanation", [])
+    chat.commands.filter(pk=message.pk).update(state="sent", turn_id="finishing")
+    AgentChatMessage.objects.filter(pk=message.pk).update(state="sent", turn_id="finishing")
+    assistant_message(chat, "finishing", "reply", "Partial reply", final=False)
+    chat.state, chat.active_turn = "busy", "finishing"
+    chat.save(update_fields=["state", "active_turn"])
+    worker.run.status = "cancelled"
+    worker.run.save(update_fields=["status"])
+
+    async def history(thread_id):
+        if thread_id == chat.thread_id:
+            yield {
+                "id": "finishing",
+                "status": status,
+                "items": [
+                    {"type": "userMessage", "clientId": str(message.pk)},
+                    {"type": "agentMessage", "id": "reply", "text": "Final reply saved by Codex"},
+                ],
+            }
+
+    async def request(method, params):
+        if method == "turn/interrupt" and interrupt_finished:
+            raise RPCError("No active turn to interrupt")
+        return {}
+
+    runtime.clients["local"].history = history
+    runtime.clients["local"].request.side_effect = request
+    asyncio.run(runtime.pump())
+    chat.refresh_from_db()
+    message.refresh_from_db()
+    reply = AgentChatMessage.objects.get(thread=chat, item_id="reply")
+    assert reply.body == "Final reply saved by Codex" and reply.state == status
+    assert message.state == ("completed" if status == "completed" else "failed")
+    assert chat.commands.get(pk=message.pk).state == message.state
+    assert chat.state == "archived" and chat.active_turn == ""
+    asyncio.run(
+        runtime.notification(
+            "local",
+            {
+                "method": "turn/completed",
+                "params": {"threadId": chat.thread_id, "turn": {"id": "finishing", "status": status}},
+            },
+            runtime.clients["local"].socket,
+        )
+    )
+    reply.refresh_from_db()
+    chat.refresh_from_db()
+    assert reply.state == status and chat.state == "archived"
+    assert all(call.args[0] != "turn/start" for call in runtime.clients["local"].request.await_args_list)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_closure_waits_for_terminal_history_without_restarting_or_repeating_work(runtime_case):
+    from plane.coordination.codex.chat import assistant_message, ensure_conversation
+    from plane.db.models.codex import AgentChatMessage
+
+    runtime, worker, chat, issue = runtime_case
+    conversation = ensure_conversation(issue)
+    conversation.chat = chat
+    conversation.save()
+    assistant_message(chat, "finishing", "reply", "Partial reply", final=False)
+    chat.state, chat.active_turn = "busy", "finishing"
+    chat.save(update_fields=["state", "active_turn"])
+    worker.run.status = "cancelled"
+    worker.run.save(update_fields=["status"])
+    finished = False
+
+    async def history(thread_id):
+        if thread_id == chat.thread_id:
+            yield {
+                "id": "finishing",
+                "status": "interrupted" if finished else "inProgress",
+                "items": [
+                    {"type": "agentMessage", "id": "reply", "text": "Final reply" if finished else "Partial reply"}
+                ],
+            }
+
+    runtime.clients["local"].history = history
+    asyncio.run(runtime.pump())
+    chat.refresh_from_db()
+    assert chat.state != "archived"
+    assert not any(
+        call.args == ("thread/archive", {"threadId": chat.thread_id})
+        for call in runtime.clients["local"].request.await_args_list
+    )
+    finished = True
+    asyncio.run(
+        runtime.notification(
+            "local",
+            {
+                "method": "turn/completed",
+                "params": {"threadId": chat.thread_id, "turn": {"id": "finishing", "status": "interrupted"}},
+            },
+        )
+    )
+    assert runtime.woken.is_set()
+    asyncio.run(runtime.pump())
+    chat.refresh_from_db()
+    reply = AgentChatMessage.objects.get(thread=chat, item_id="reply")
+    assert chat.state == "archived" and reply.body == "Final reply" and reply.state == "interrupted"
+    assert all(call.args[0] != "turn/start" for call in runtime.clients["local"].request.await_args_list)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("method", ["turn/started", "turn/completed"])
+def test_late_turn_notifications_do_not_reactivate_an_archived_session(runtime_case, method):
+    runtime, worker, _, _ = runtime_case
+    worker.run.status = "cancelled"
+    worker.run.save(update_fields=["status"])
+    worker.state, worker.active_turn = "archived", ""
+    worker.save(update_fields=["state", "active_turn"])
+    command = CodexCommand.objects.create(thread=worker, text="Finished work", state="sent", turn_id="finishing")
+    asyncio.run(
+        runtime.notification(
+            "local",
+            {
+                "method": method,
+                "params": {
+                    "threadId": worker.thread_id,
+                    "turn": {"id": "finishing", "status": "completed" if method == "turn/completed" else "inProgress"},
+                },
+            },
+            runtime.clients["local"].socket,
+        )
+    )
+    worker.refresh_from_db()
+    command.refresh_from_db()
+    assert worker.state == "archived" and worker.active_turn == ""
+    assert command.state == ("completed" if method == "turn/completed" else "sent")
+
+
 def test_rpc_disconnect_releases_pending_requests():
     class Socket:
         async def send(self, data):
@@ -931,6 +1080,51 @@ def test_old_connection_status_does_not_overwrite_the_restored_turn(native_runti
     assert worker.state == "busy" and worker.active_turn == "working"
 
 
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("status", ["completed", "failed"])
+def test_queued_user_delivery_does_not_reopen_a_message_settled_by_history(native_runtime_case, status):
+    from plane.coordination.codex.chat import ensure_conversation, post_message
+
+    runtime, _, chat, issue = native_runtime_case
+    conversation = ensure_conversation(issue)
+    conversation.chat = chat
+    conversation.save()
+    message = post_message(issue, issue.created_by, uuid4(), "Explain the current work", [])
+
+    async def exercise():
+        client = runtime.clients["local"]
+        socket = AsyncMock()
+        socket.__aiter__.return_value = [
+            json.dumps(
+                {
+                    "method": "item/completed",
+                    "params": {
+                        "threadId": chat.thread_id,
+                        "turnId": "settled",
+                        "item": {"type": "userMessage", "clientId": str(message.pk)},
+                    },
+                }
+            )
+        ]
+        client.socket = socket
+        await client.receive()
+        await runtime.reconcile_turn(
+            chat,
+            {"id": "settled", "status": status, "items": [{"type": "userMessage", "clientId": str(message.pk)}]},
+        )
+        client.socket = AsyncMock()
+        consumer = asyncio.create_task(runtime.notifications())
+        try:
+            await runtime.events.join()
+        finally:
+            consumer.cancel()
+            await asyncio.gather(consumer, return_exceptions=True)
+
+    asyncio.run(exercise())
+    message.refresh_from_db()
+    assert message.state == status and chat.commands.get(pk=message.pk).state == status
+
+
 def test_native_client_is_ready_only_after_session_reconciliation(monkeypatch):
     from plane.coordination.codex import client as module
 
@@ -1178,6 +1372,30 @@ def test_history_reads_all_pages_without_replaying_messages():
         history = [turn async for turn in client.history("chat")]
         assert len(history) == 2 and len(history[0]["items"]) == 2
         assert all(call.args[0] != "turn/start" for call in client.request.await_args_list)
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("not_materialized", [False, True])
+def test_native_history_accepts_empty_threads_without_suppressing_other_errors(not_materialized):
+    from plane.coordination.codex.client import RPCError
+
+    async def exercise():
+        client = CodexClient({}, AsyncMock(), AsyncMock(), AsyncMock())
+        message = (
+            "thread fresh is not materialized yet; thread/turns/list is unavailable before first user message"
+            if not_materialized
+            else "History request failed"
+        )
+        client.request = AsyncMock(side_effect=RPCError(message))
+        if not_materialized:
+            assert [turn async for turn in client.history("fresh")] == []
+        else:
+            with pytest.raises(RPCError, match="History request failed"):
+                _ = [turn async for turn in client.history("fresh")]
+        client.request.assert_awaited_once_with(
+            "thread/turns/list", {"threadId": "fresh", "cursor": None, "sortDirection": "asc"}
+        )
 
     asyncio.run(exercise())
 

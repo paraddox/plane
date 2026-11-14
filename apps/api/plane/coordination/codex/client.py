@@ -112,9 +112,18 @@ class CodexClient:
     async def history(self, thread_id):
         cursor = None
         while True:
-            page = await self.request(
-                "thread/turns/list", {"threadId": thread_id, "cursor": cursor, "sortDirection": "asc"}
-            )
+            try:
+                page = await self.request(
+                    "thread/turns/list", {"threadId": thread_id, "cursor": cursor, "sortDirection": "asc"}
+                )
+            except RPCError as error:
+                # Native threads have no persisted history before their first user message.
+                if cursor is None and str(error) == (
+                    f"thread {thread_id} is not materialized yet; "
+                    "thread/turns/list is unavailable before first user message"
+                ):
+                    return
+                raise
             for turn in page["data"]:
                 items = []
                 item_cursor = None
