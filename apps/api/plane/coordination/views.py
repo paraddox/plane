@@ -161,12 +161,9 @@ class ReleaseDetailEndpoint(CoordinationEndpoint):
 
 
 class ExecutionPolicySerializer(serializers.ModelSerializer):
-    required_checks = serializers.ListField(child=serializers.CharField(), required=False)
-    context_references = serializers.ListField(child=serializers.URLField(), required=False)
-
     class Meta:
         model = ProjectExecutionPolicy
-        fields = ["project", "enabled", "required_checks", "context_references"]
+        fields = ["project", "enabled"]
         read_only_fields = ["project"]
 
 

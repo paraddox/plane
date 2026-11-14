@@ -51,8 +51,6 @@ def seed(owner_email, policy_project_id, output, *, repository, base_branch, sig
         project=project,
         defaults={
             "enabled": True,
-            "required_checks": source.required_checks,
-            "context_references": source.context_references,
         },
     )
     path = Path(output)

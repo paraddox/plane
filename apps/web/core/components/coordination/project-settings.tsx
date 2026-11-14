@@ -35,8 +35,6 @@ export function CoordinationProjectSettings({ workspaceSlug, projectId, canAdmin
     mutate: refreshAgents,
   } = useSWR(["coordination-agents", workspaceSlug, projectId], () => service.agents(workspaceSlug, projectId));
   const [enabled, setEnabled] = useState(false);
-  const [checks, setChecks] = useState("");
-  const [contexts, setContexts] = useState("");
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -51,8 +49,6 @@ export function CoordinationProjectSettings({ workspaceSlug, projectId, canAdmin
   useEffect(() => {
     if (!policy || dirty) return;
     setEnabled(policy.enabled);
-    setChecks(policy.required_checks.join("\n"));
-    setContexts(policy.context_references.join("\n"));
   }, [policy, dirty]);
 
   const change = () => {
@@ -115,14 +111,6 @@ export function CoordinationProjectSettings({ workspaceSlug, projectId, canAdmin
               void action(async () => {
                 const input: Omit<TExecutionPolicy, "project"> = {
                   enabled,
-                  required_checks: checks
-                    .split("\n")
-                    .map((value) => value.trim())
-                    .filter(Boolean),
-                  context_references: contexts
-                    .split("\n")
-                    .map((value) => value.trim())
-                    .filter(Boolean),
                 };
                 await service.savePolicy(workspaceSlug, projectId, input);
                 setDirty(false);
@@ -142,30 +130,6 @@ export function CoordinationProjectSettings({ workspaceSlug, projectId, canAdmin
                   }}
                 />
                 Agent execution enabled
-              </label>
-              <label className="block space-y-1">
-                <span>Required CI checks</span>
-                <textarea
-                  className={field}
-                  rows={2}
-                  value={checks}
-                  onChange={(event) => {
-                    setChecks(event.target.value);
-                    change();
-                  }}
-                />
-              </label>
-              <label className="block space-y-1">
-                <span>Context references</span>
-                <textarea
-                  className={field}
-                  rows={3}
-                  value={contexts}
-                  onChange={(event) => {
-                    setContexts(event.target.value);
-                    change();
-                  }}
-                />
               </label>
               <div className="flex flex-wrap items-center gap-3">
                 <Button type="submit" disabled={!dirty}>

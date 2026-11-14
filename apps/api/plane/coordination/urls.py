@@ -61,7 +61,11 @@ def build_patterns(machine=False):
             path(base + "runs/<uuid:run_id>/evidence/", workflow_views.EvidenceEndpoint.as_view()),
         ]
     else:
+        from .codex.views import ConversationEndpoint, ConversationStreamEndpoint
+
         patterns += [
+            path(base + "work-items/<uuid:issue_id>/conversation/", ConversationEndpoint.as_view()),
+            path(base + "work-items/<uuid:issue_id>/conversation/stream/", ConversationStreamEndpoint.as_view()),
             path(base + "runs/<uuid:run_id>/cancel/", views.CancelRunEndpoint.as_view()),
             path(base + "agents/<uuid:access_id>/credentials/", views.AgentCredentialsEndpoint.as_view()),
             path(

@@ -40,7 +40,14 @@ try {
   assert.equal(await policy.getByLabel("Base branch", { exact: true }).count(), 0);
   assert.equal(await policy.getByLabel("Credential lifetime (seconds)", { exact: true }).count(), 0);
   assert.equal(await policy.getByLabel("Execution lease (seconds)", { exact: true }).count(), 0);
-  assert.equal(await policy.getByLabel("Required CI checks", { exact: true }).count(), 1);
+  assert.equal(await policy.getByLabel("Required CI checks", { exact: true }).count(), 0);
+  assert.equal(await policy.getByLabel("Context references", { exact: true }).count(), 0);
+  assert.equal(await policy.getByRole("textbox").count(), 0);
+  const policyResponse = await context.request.get(
+    `${web}/api/workspaces/${fixture.workspace}/projects/${project}/coordination/policy/`
+  );
+  assert.equal(policyResponse.status(), 200);
+  assert.deepEqual(Object.keys(await policyResponse.json()).toSorted(), ["enabled", "project"]);
   const releases = page.getByRole("region", { name: "Project releases", exact: true });
   await releases.getByRole("heading", { name: "Project Releases", exact: true }).waitFor();
   await releases.getByRole("button", { name: "Create release", exact: true }).waitFor();
@@ -64,6 +71,7 @@ try {
     billing_page_removed: true,
     release_creation_form_available: true,
     repository_and_timed_credential_settings_removed: true,
+    project_ci_and_context_settings_removed: true,
     personal_api_key_page_available: true,
     releases_url: releasesUrl,
     page_errors: errors,

@@ -198,7 +198,7 @@ def lock_execution_credential(request, run):
 @transaction.atomic
 def claim_task(request, project, issue_id, data):
     parent = require_dispatcher(request, project)
-    policy = execution_policy(project)
+    execution_policy(project)
     serializer = ClaimSerializer(data=data)
     serializer.is_valid(raise_exception=True)
     agent = serializer.validated_data["agent"]
@@ -223,7 +223,7 @@ def claim_task(request, project, issue_id, data):
     ):
         raise CoordinationConflict("This task is not ready for execution.")
     previous = AgentRun.objects.filter(contract=contract).aggregate(last=Max("attempt"))["last"] or 0
-    snapshot = specification_snapshot(contract, policy)
+    snapshot = specification_snapshot(contract)
     run = AgentRun.objects.create(
         project=project,
         contract=contract,
@@ -266,7 +266,7 @@ def claim_task(request, project, issue_id, data):
     return run
 
 
-def specification_snapshot(contract, policy):
+def specification_snapshot(contract):
     return {
         "issue_id": str(contract.issue_id),
         "owner_id": str(contract.owner_id),
@@ -279,7 +279,6 @@ def specification_snapshot(contract, policy):
         "module_ids": [
             str(pk) for pk in ModuleIssue.objects.filter(issue_id=contract.issue_id).values_list("module_id", flat=True)
         ],
-        "context_references": policy.context_references,
     }
 
 
@@ -385,7 +384,7 @@ def refresh_execution(request, project, run_id):
             },
         )
         run.spec_revision = run.contract.spec_revision
-        run.spec_snapshot = specification_snapshot(run.contract, execution_policy(project))
+        run.spec_snapshot = specification_snapshot(run.contract)
         run.head_sha, run.pull_request, run.last_error = "", None, ""
         run.code_revision += 1
     run.last_heartbeat = timezone.now()

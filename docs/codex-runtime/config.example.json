@@ -1,0 +1,41 @@
+{
+  "api_url": "http://api:8000",
+  "runtimes": {
+    "workstation-main": {
+      "host": "workstation",
+      "url": "ws://workstation.tailnet.example:18431",
+      "token_env": "WORKSTATION_CODEX_WS_TOKEN"
+    },
+    "soso-build": {
+      "host": "soso",
+      "url": "ws://soso.tailnet.example:18431",
+      "token_env": "SOSO_CODEX_WS_TOKEN"
+    }
+  },
+  "projects": [
+    {
+      "workspace": "example",
+      "runtime": "soso-build",
+      "project_id": "00000000-0000-0000-0000-000000000001",
+      "dispatcher_key_env": "EXAMPLE_PLANE_MAIN_KEY",
+      "worker_id": "00000000-0000-0000-0000-000000000002",
+      "repository": "example/product",
+      "base_branch": "main",
+      "instructions": ["AGENTS.md", "projects/example/AGENTS.md"],
+      "placement": {
+        "overseer": {
+          "cwd": "/srv/product",
+          "instructions": ["roles/overseer.md"]
+        },
+        "implementation": {
+          "cwd": "/srv/product",
+          "instructions": ["roles/implementation.md"]
+        },
+        "chat": {
+          "cwd": "/srv/product",
+          "instructions": ["roles/chat.md"]
+        }
+      }
+    }
+  ]
+}

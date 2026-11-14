@@ -14,10 +14,9 @@ from .test_coordination_handoff import handoff, refresh
 def test_project_policy_needs_no_repository_or_durations(execution):
     _, human, _, _, _, _, _, _, _, prefix = execution
     url = prefix.replace("/api/v1/", "/api/") + "policy/"
-    response = human.put(url, {"enabled": True, "required_checks": ["tests"]}, format="json")
+    response = human.put(url, {"enabled": True}, format="json")
     assert response.status_code == 200, response.data
-    assert set(response.data) == {"project", "enabled", "context_references", "required_checks"}
-    assert response.data["required_checks"] == ["tests"]
+    assert response.json() == {"project": str(execution[2].pk), "enabled": True}
 
 
 @pytest.mark.django_db
@@ -32,6 +31,7 @@ def test_claim_uses_agent_repository_and_target_without_project_setup(execution)
     assert response.data["repository"] == "other/project"
     assert response.data["base_branch"] == "develop"
     assert "lease_expires_at" not in response.data
+    assert "context_references" not in response.data["spec_snapshot"]
 
 
 @pytest.mark.django_db

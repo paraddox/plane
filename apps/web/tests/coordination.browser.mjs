@@ -38,9 +38,8 @@ async function fits(view, label) {
 try {
   await page.goto(`${web}/${fixture.workspace}/settings/projects/${fixture.project}/coordination/`);
   await page.getByRole("heading", { name: "Execution Policy", exact: true }).waitFor();
+  await page.getByLabel("Agent execution enabled").uncheck();
   await page.getByLabel("Agent execution enabled").check();
-  await page.getByLabel("Required CI checks").first().fill("tests");
-  await page.getByLabel("Context references").fill(`https://example.com/docs/${fixture.issue}`);
   await page.getByRole("button", { name: "Save policy", exact: true }).click();
   await page.getByRole("status").filter({ hasText: "Saved" }).waitFor();
   const releaseIdentifier = `BROWSER-${Date.now()}`;

@@ -51,8 +51,6 @@ export type TProjectRelease = {
 export type TExecutionPolicy = {
   project: string;
   enabled: boolean;
-  required_checks: string[];
-  context_references: string[];
 };
 export type TAgentRun = {
   id: string;
@@ -71,7 +69,6 @@ export type TAgentRun = {
     definition_of_done: TAcceptanceCriterion[];
     release_id: string | null;
     module_ids: string[];
-    context_references: string[];
   };
   repository: string;
   base_branch: string;
