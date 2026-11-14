@@ -332,7 +332,7 @@ def test_slow_notifications_do_not_block_other_threads_and_keep_thread_order(
         entered, release = asyncio.Event(), asyncio.Event()
         seen = []
 
-        async def handle(runtime_id, message):
+        async def handle(runtime_id, message, connection):
             identifier = message["id"]
             seen.append(identifier)
             if identifier == "slow":
@@ -343,9 +343,12 @@ def test_slow_notifications_do_not_block_other_threads_and_keep_thread_order(
                     raise ValueError("A failed tool must not strand later notifications")
 
         runtime.notification = handle
-        runtime.events.put_nowait(("local", {"id": "slow", "params": {"threadId": "worker"}}))
-        runtime.events.put_nowait(("local", {"id": "same-thread", "params": {"threadId": "worker"}}))
-        runtime.events.put_nowait((other_runtime, {"id": "other-thread", "params": {"threadId": other_thread}}))
+        connection = object()
+        runtime.events.put_nowait(("local", {"id": "slow", "params": {"threadId": "worker"}}, connection))
+        runtime.events.put_nowait(("local", {"id": "same-thread", "params": {"threadId": "worker"}}, connection))
+        runtime.events.put_nowait(
+            (other_runtime, {"id": "other-thread", "params": {"threadId": other_thread}}, connection)
+        )
         consumer = asyncio.create_task(runtime.notifications())
         try:
             await entered.wait()
@@ -468,7 +471,7 @@ def test_notification_shutdown_cancels_in_progress_handlers(runtime_case):
                 stopped.set()
 
         runtime.notification = handle
-        runtime.events.put_nowait(("local", {"params": {"threadId": "worker"}}))
+        runtime.events.put_nowait(("local", {"params": {"threadId": "worker"}}, object()))
         consumer = asyncio.create_task(runtime.notifications())
         await entered.wait()
         consumer.cancel()
@@ -715,6 +718,217 @@ def test_rpc_send_disconnect_is_a_recoverable_connection_error():
         assert not client.pending
 
     asyncio.run(exercise())
+
+
+@pytest.fixture
+def native_runtime_case(runtime_case):
+    runtime, worker, chat, issue = runtime_case
+    native = Runtime(runtime.config)
+    yield native, worker, chat, issue
+    asyncio.run(native.api.aclose())
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("tool_call", [False, True])
+@pytest.mark.parametrize("reconnected", [False, True])
+def test_queued_native_requests_are_not_executed_after_their_connection_is_lost(
+    native_runtime_case, tool_call, reconnected
+):
+    runtime, worker, _, _ = native_runtime_case
+
+    async def exercise():
+        client = runtime.clients["local"]
+        original, replacement = AsyncMock(), AsyncMock()
+        message = {
+            "id": "request",
+            "method": "item/tool/call" if tool_call else "item/commandExecution/requestApproval",
+            "params": {"threadId": worker.thread_id, "tool": "plane", "arguments": {}},
+        }
+        original.__aiter__.return_value = [json.dumps(message)]
+        client.socket = original
+        runtime.tool = AsyncMock(return_value={"done": True})
+        await client.receive()
+        client.socket = replacement if reconnected else None
+        consumer = asyncio.create_task(runtime.notifications())
+        try:
+            await runtime.events.join()
+        finally:
+            consumer.cancel()
+            await asyncio.gather(consumer, return_exceptions=True)
+        runtime.tool.assert_not_awaited()
+        original.send.assert_not_awaited()
+        replacement.send.assert_not_awaited()
+
+    asyncio.run(exercise())
+    worker.refresh_from_db()
+    assert worker.state == "busy" and not worker.error
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("reconnected", [False, True])
+def test_native_tool_finishing_after_disconnect_never_replies_on_a_replacement_connection(
+    native_runtime_case, reconnected
+):
+    runtime, worker, _, _ = native_runtime_case
+
+    async def exercise():
+        entered, release = asyncio.Event(), asyncio.Event()
+        client = runtime.clients["local"]
+        original, replacement = AsyncMock(), AsyncMock()
+        original.__aiter__.return_value = [
+            json.dumps(
+                {
+                    "id": "request",
+                    "method": "item/tool/call",
+                    "params": {"threadId": worker.thread_id, "tool": "plane", "arguments": {}},
+                }
+            )
+        ]
+
+        async def tool(*args):
+            entered.set()
+            await release.wait()
+            return {"done": True}
+
+        runtime.tool = AsyncMock(side_effect=tool)
+        client.socket = original
+        await client.receive()
+        consumer = asyncio.create_task(runtime.notifications())
+        try:
+            await entered.wait()
+            client.socket = replacement if reconnected else None
+            release.set()
+            await runtime.events.join()
+            runtime.tool.assert_awaited_once()
+            original.send.assert_not_awaited()
+            replacement.send.assert_not_awaited()
+        finally:
+            release.set()
+            consumer.cancel()
+            await asyncio.gather(consumer, return_exceptions=True)
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("tool_call", [False, True])
+def test_native_requests_reply_on_their_live_connection(native_runtime_case, tool_call):
+    runtime, worker, _, _ = native_runtime_case
+
+    async def exercise():
+        client = runtime.clients["local"]
+        socket = AsyncMock()
+        socket.__aiter__.return_value = [
+            json.dumps(
+                {
+                    "id": "request",
+                    "method": "item/tool/call" if tool_call else "item/commandExecution/requestApproval",
+                    "params": {"threadId": worker.thread_id, "tool": "plane", "arguments": {}},
+                }
+            )
+        ]
+        client.socket = socket
+        runtime.tool = AsyncMock(return_value={"done": True})
+        await client.receive()
+        consumer = asyncio.create_task(runtime.notifications())
+        try:
+            await runtime.events.join()
+        finally:
+            consumer.cancel()
+            await asyncio.gather(consumer, return_exceptions=True)
+        socket.send.assert_awaited_once()
+        reply = json.loads(socket.send.await_args.args[0])
+        assert reply["id"] == "request"
+        if tool_call:
+            assert reply["result"]["success"] is True
+            assert json.loads(reply["result"]["contentItems"][0]["text"]) == {"done": True}
+            runtime.tool.assert_awaited_once()
+        else:
+            assert reply["error"]["code"] == -32601
+            runtime.tool.assert_not_awaited()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.django_db(transaction=True)
+def test_queued_chat_output_survives_a_connection_change(native_runtime_case):
+    from plane.coordination.codex.chat import ensure_conversation
+    from plane.db.models.codex import AgentChatMessage
+
+    runtime, _, chat, issue = native_runtime_case
+    ensure_conversation(issue)
+
+    async def exercise():
+        client = runtime.clients["local"]
+        socket = AsyncMock()
+        socket.__aiter__.return_value = [
+            json.dumps(
+                {
+                    "method": "item/completed",
+                    "params": {
+                        "threadId": chat.thread_id,
+                        "turnId": "turn",
+                        "item": {"type": "agentMessage", "id": "answer", "text": "Completed before disconnect"},
+                    },
+                }
+            )
+        ]
+        client.socket = socket
+        await client.receive()
+        client.socket = AsyncMock()
+        consumer = asyncio.create_task(runtime.notifications())
+        try:
+            await runtime.events.join()
+        finally:
+            consumer.cancel()
+            await asyncio.gather(consumer, return_exceptions=True)
+
+    asyncio.run(exercise())
+    message = AgentChatMessage.objects.get(conversation__issue=issue)
+    assert message.body == "Completed before disconnect" and message.state == "completed"
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("method", ["turn/started", "turn/completed"])
+def test_old_connection_status_does_not_overwrite_the_restored_turn(native_runtime_case, method):
+    runtime, worker, _, _ = native_runtime_case
+    previous = CodexCommand.objects.create(thread=worker, text="Previous turn", state="sent", turn_id="previous")
+    current = CodexCommand.objects.create(thread=worker, text="Current turn", state="sent", turn_id="working")
+
+    async def exercise():
+        client = runtime.clients["local"]
+        socket = AsyncMock()
+        socket.__aiter__.return_value = [
+            json.dumps(
+                {
+                    "method": method,
+                    "params": {
+                        "threadId": worker.thread_id,
+                        "turn": {
+                            "id": "previous",
+                            "status": "completed" if method == "turn/completed" else "inProgress",
+                        },
+                    },
+                }
+            )
+        ]
+        client.socket = socket
+        await client.receive()
+        client.socket = AsyncMock()
+        consumer = asyncio.create_task(runtime.notifications())
+        try:
+            await runtime.events.join()
+        finally:
+            consumer.cancel()
+            await asyncio.gather(consumer, return_exceptions=True)
+
+    asyncio.run(exercise())
+    previous.refresh_from_db()
+    current.refresh_from_db()
+    worker.refresh_from_db()
+    assert previous.state == ("completed" if method == "turn/completed" else "sent")
+    assert current.state == "sent"
+    assert worker.state == "busy" and worker.active_turn == "working"
 
 
 def test_native_client_is_ready_only_after_session_reconciliation(monkeypatch):

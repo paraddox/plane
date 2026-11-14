@@ -39,11 +39,15 @@ class CodexClient:
         finally:
             self.pending.pop(identifier, None)
 
-    async def reply(self, identifier, result):
-        await self.socket.send(json.dumps({"id": identifier, "result": result}))
+    async def reply(self, identifier, result, *, connection):
+        if connection is None or connection is not self.socket:
+            return
+        await connection.send(json.dumps({"id": identifier, "result": result}))
 
-    async def reject(self, identifier, message):
-        await self.socket.send(json.dumps({"id": identifier, "error": {"code": -32601, "message": message}}))
+    async def reject(self, identifier, message, *, connection):
+        if connection is None or connection is not self.socket:
+            return
+        await connection.send(json.dumps({"id": identifier, "error": {"code": -32601, "message": message}}))
 
     async def read(self):
         try:
@@ -55,7 +59,8 @@ class CodexClient:
                     future.set_exception(ConnectionError("Codex connection lost; reconcile delivery"))
 
     async def receive(self):
-        async for raw in self.socket:
+        socket = self.socket
+        async for raw in socket:
             message = json.loads(raw)
             if "method" not in message and message.get("id") in self.pending:
                 future = self.pending[message["id"]]
@@ -65,7 +70,7 @@ class CodexClient:
                     else:
                         future.set_result(message.get("result"))
             else:
-                await self.handler(message)
+                await self.handler(message, socket)
 
     async def restore(self):
         await self.connected()

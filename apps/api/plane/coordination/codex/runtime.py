@@ -79,7 +79,7 @@ class Runtime:
         self.clients = {
             name: CodexClient(
                 value,
-                lambda message, name=name: self.events.put((name, message)),
+                lambda message, connection, name=name: self.events.put((name, message, connection)),
                 lambda name=name: self.reconnect(name),
                 lambda name=name: self.offline(name),
             )
@@ -526,9 +526,9 @@ class Runtime:
         async def consume(key, queue):
             try:
                 while not queue.empty():
-                    runtime_id, message = queue.get_nowait()
+                    runtime_id, message, connection = queue.get_nowait()
                     try:
-                        await self.notification(runtime_id, message)
+                        await self.notification(runtime_id, message, connection)
                     except Exception:
                         logger.exception("Codex event could not be processed")
                     finally:
@@ -538,7 +538,7 @@ class Runtime:
 
         try:
             while True:
-                runtime_id, message = await self.events.get()
+                runtime_id, message, connection = await self.events.get()
                 key = (runtime_id, message.get("params", {}).get("threadId"))
                 queue = queues.get(key)
                 if queue is None:
@@ -547,13 +547,13 @@ class Runtime:
                     worker = asyncio.create_task(consume(key, queue))
                     workers.add(worker)
                     worker.add_done_callback(workers.discard)
-                queue.put_nowait((runtime_id, message))
+                queue.put_nowait((runtime_id, message, connection))
         finally:
             for worker in workers:
                 worker.cancel()
             await asyncio.gather(*workers, return_exceptions=True)
 
-    async def notification(self, runtime_id, message):
+    async def notification(self, runtime_id, message, connection=None):
         params = message.get("params", {})
         thread = await db(
             lambda: CodexThread.objects.filter(runtime_id=runtime_id, thread_id=params.get("threadId")).first()
@@ -562,10 +562,14 @@ class Runtime:
             return
         method = message.get("method")
         if "id" in message:
+            client = self.clients[runtime_id]
+            # Requests are connection-scoped; already received transcript notifications remain useful.
+            if connection is None or connection is not client.socket:
+                return
             if method != "item/tool/call" or params.get("tool") != "plane":
                 error = "Codex requires operator input. Configure the host's approved unattended policy."
                 await db(CodexThread.objects.filter(pk=thread.pk).update)(state="needs_attention", error=error)
-                await self.clients[runtime_id].reject(message["id"], error)
+                await client.reject(message["id"], error, connection=connection)
                 await db(wake)()
                 return
             result, success = None, True
@@ -573,9 +577,10 @@ class Runtime:
                 result = await self.tool(thread, params["arguments"])
             except Exception as error:
                 result, success = str(error), False
-            await self.clients[runtime_id].reply(
+            await client.reply(
                 message["id"],
                 {"contentItems": [{"type": "inputText", "text": json.dumps(result, default=str)}], "success": success},
+                connection=connection,
             )
         elif method == "item/agentMessage/delta" and thread.role == "chat":
             await db(assistant_message)(thread, params["turnId"], params["itemId"], params["delta"], final=False)
@@ -593,6 +598,8 @@ class Runtime:
                 )
                 await db(wake)()
         elif method == "turn/started":
+            if connection is not None and connection is not self.clients[runtime_id].socket:
+                return
             await db(CodexThread.objects.filter(pk=thread.pk).update)(state="busy", active_turn=params["turn"]["id"])
             await db(wake)()
         elif method == "turn/completed":
@@ -602,12 +609,13 @@ class Runtime:
             await db(
                 AgentChatMessage.objects.filter(thread=thread, turn_id=turn["id"]).exclude(state="completed").update
             )(state=state)
-            await db(CodexThread.objects.filter(pk=thread.pk).update)(
-                state="idle",
-                active_turn="",
-                error=turn.get("error", {}).get("message", "") if turn.get("error") else "",
-            )
-            self.woken.set()
+            if connection is None or connection is self.clients[runtime_id].socket:
+                await db(CodexThread.objects.filter(pk=thread.pk).update)(
+                    state="idle",
+                    active_turn="",
+                    error=turn.get("error", {}).get("message", "") if turn.get("error") else "",
+                )
+                self.woken.set()
             await db(wake)()
 
     @db
