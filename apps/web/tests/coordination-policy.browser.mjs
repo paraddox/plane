@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
 import { readFile, mkdir } from "node:fs/promises";
 import { createRequire } from "node:module";
 
@@ -32,33 +31,36 @@ const policy = async (project) => {
 try {
   const before = await policy(fixture.second_project);
   await page.goto(web + route(fixture.second_project));
-  await page.getByLabel("Required CI checks").waitFor();
-  assert.equal(await page.getByLabel("Required CI checks").inputValue(), before.required_checks.join("\n"));
+  await page.getByLabel("Agent execution enabled").waitFor();
+  assert.equal(await page.getByLabel("Agent execution enabled").isChecked(), before.enabled);
+  assert.equal(await page.getByLabel("Required CI checks", { exact: true }).count(), 0);
+  assert.equal(await page.getByLabel("Context references", { exact: true }).count(), 0);
   const timeOrigin = await page.evaluate(() => performance.timeOrigin);
   const navigate = async (project) => {
     await page.evaluate((path) => window.__reactRouterDataRouter.navigate(path), route(project));
     await page.waitForURL(web + route(project));
-    await page.getByLabel("Required CI checks").waitFor();
+    await page.getByLabel("Agent execution enabled").waitFor();
     assert.equal(await page.evaluate(() => performance.timeOrigin), timeOrigin, "Navigation must stay in the SPA");
   };
   await navigate(fixture.project);
-  await page.getByLabel("Required CI checks").fill("unsaved-first-check");
+  const first = await policy(fixture.project);
+  await page.getByLabel("Agent execution enabled").setChecked(!first.enabled);
   await page.getByLabel("Identifier", { exact: true }).fill("UNSAVED");
   await page.getByLabel("Release name", { exact: true }).fill("First project draft");
   await navigate(fixture.second_project);
-  assert.equal(await page.getByLabel("Required CI checks").inputValue(), before.required_checks.join("\n"));
+  assert.equal(await page.getByLabel("Agent execution enabled").isChecked(), before.enabled);
   assert.equal(await page.getByLabel("Identifier", { exact: true }).inputValue(), "");
   assert.equal(await page.getByLabel("Release name", { exact: true }).inputValue(), "");
-  const contextReference = `https://example.com/second/${randomUUID()}`;
-  await page.getByLabel("Context references").fill(contextReference);
+  await page.getByLabel("Agent execution enabled").setChecked(!before.enabled);
+  await page.getByLabel("Agent execution enabled").setChecked(before.enabled);
+  const savedRequest = page.waitForRequest(
+    (request) => request.method() === "PUT" && request.url().endsWith("/coordination/policy/")
+  );
   await page.getByRole("button", { name: "Save policy", exact: true }).click();
   await page.getByRole("status").filter({ hasText: "Saved" }).waitFor();
   const after = await policy(fixture.second_project);
-  assert.deepEqual(
-    after,
-    { ...before, context_references: [contextReference] },
-    "Saving the second project must not copy the first project's draft"
-  );
+  assert.deepEqual((await savedRequest).postDataJSON(), { enabled: before.enabled });
+  assert.deepEqual(after, before, "Saving the second project must not copy the first project's draft");
   await page.screenshot({ path: `${output}/policy-navigation-desktop.png`, fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.screenshot({ path: `${output}/policy-navigation-mobile.png`, fullPage: true });

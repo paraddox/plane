@@ -5,7 +5,7 @@
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 
 import jwt
 import pytest
@@ -26,7 +26,7 @@ def github_http(settings, monkeypatch):
     ).decode()
     settings.COORDINATION_GITHUB_INSTALLATIONS = json.dumps({"project-id": {"example/product": 42}})
     settings.COORDINATION_GITHUB_HTTP_TIMEOUT = "10"
-    state = {"requests": [], "merged": False, "merge_status": 200, "checks_pages": False}
+    state = {"requests": [], "merged": False, "merge_status": 200}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -44,7 +44,7 @@ def github_http(settings, monkeypatch):
                 )
                 assert claims["iss"] == "test-app" and claims["exp"] - claims["iat"] == 600
                 assert body["repositories"] == ["product"]
-                assert body["permissions"]["contents"] == "write"
+                assert body["permissions"] == {"contents": "write", "pull_requests": "read"}
                 result, status = {"token": "synthetic-installation-token"}, 201
             else:
                 assert self.headers["Authorization"] == "Bearer synthetic-installation-token"
@@ -66,28 +66,6 @@ def github_http(settings, monkeypatch):
                         "base_commit": {"sha": sha},
                         "merge_base_commit": {"sha": sha if merged else "d" * 40},
                     }
-                elif parsed.path.endswith("/check-runs"):
-                    page = parse_qs(parsed.query)["page"][0]
-                    if state["checks_pages"] and page == "1":
-                        result = {
-                            "check_runs": [
-                                {"name": f"job-{i}", "status": "completed", "conclusion": "success"} for i in range(100)
-                            ]
-                        }
-                    elif state["checks_pages"]:
-                        result = {"check_runs": [{"name": "last-job", "status": "completed", "conclusion": "failure"}]}
-                    else:
-                        result = {
-                            "check_runs": [
-                                {
-                                    "name": "tests",
-                                    "status": "completed",
-                                    "conclusion": state.get("check_conclusion", "success"),
-                                }
-                            ]
-                        }
-                elif parsed.path.endswith("/status"):
-                    result = {"statuses": [{"context": "external-ci", "state": "success"}]}
                 else:
                     result = {
                         "head": {"sha": state.get("head_sha", "a" * 40)},
@@ -122,18 +100,11 @@ def github_http(settings, monkeypatch):
 def test_github_contract_uses_repository_limited_app_credential_and_expected_sha(github_http):
     client = GitHubClient("project-id", "example/product")
     assert client.pull_request(7)["merged"] is False
-    assert client.checks("a" * 40) == {"tests": [True], "external-ci": [True]}
     client.merge("main", "a" * 40)
     assert client.pull_request(7)["merged"] is True
     merge = next(row for row in github_http["requests"] if row[1].endswith("/merges"))
     assert merge == ("POST", "/repos/example/product/merges", {"base": "main", "head": "a" * 40})
     assert client.target_status("main", "a" * 40)["merged"] is True
-
-
-def test_all_check_pages_are_read(github_http):
-    github_http["checks_pages"] = True
-    client = GitHubClient("project-id", "example/product")
-    assert client.checks("a" * 40)["last-job"] == [False]
 
 
 @pytest.mark.parametrize("status,error", [(409, MergeRejected), (503, ProviderUnavailable), (429, ProviderUnavailable)])

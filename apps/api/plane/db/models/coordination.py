@@ -38,8 +38,6 @@ class ProjectRelease(ProjectBaseModel):
 
 class ProjectExecutionPolicy(ProjectBaseModel):
     enabled = models.BooleanField(default=False)
-    required_checks = models.JSONField(default=list)
-    context_references = models.JSONField(default=list)
 
     class Meta:
         db_table = "project_execution_policies"

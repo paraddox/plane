@@ -15,7 +15,7 @@ const { outputText } = ts.transpileModule(source, {
 const exports = {};
 const mocks = {
   swr: ([key]) => ({
-    data: key === "coordination-policy" ? { enabled: true, required_checks: [], context_references: [] } : [],
+    data: key === "coordination-policy" ? { enabled: true } : [],
   }),
   "@/services/coordination.service": { CoordinationService: function () {} },
   "./helpers": { coordinationError: String },
@@ -35,10 +35,9 @@ test("project policy has no repository setup or timed worker authority", () => {
     })
   );
   assert.match(html, /Agent execution enabled/);
-  assert.match(html, /Required CI checks/);
   assert.match(html, /Create release/);
   assert.doesNotMatch(
     html,
-    /Repositories|Repository \(owner\/name\)|Base branch|Credential lifetime|Execution lease|Add repository/
+    /Repositories|Repository \(owner\/name\)|Base branch|Credential lifetime|Execution lease|Add repository|Required CI checks|Context references/
   );
 });

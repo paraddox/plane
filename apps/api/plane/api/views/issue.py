@@ -11,6 +11,7 @@ import hashlib
 # Django imports
 from django.core.serializers.json import DjangoJSONEncoder
 from django.http import HttpResponseRedirect
+from django.shortcuts import get_object_or_404
 from django.db import IntegrityError, transaction
 from django.db.models import (
     Case,
@@ -2064,6 +2065,7 @@ class IssueAttachmentDetailAPIEndpoint(BaseAPIView):
     serializer_class = IssueAttachmentSerializer
     model = FileAsset
     use_read_replica = True
+    idempotency_unsupported_methods = {"POST"}
 
     def check_idempotency_permissions(self, request, slug, project_id, issue_id, pk):
         issue = Issue.objects.get(pk=issue_id, workspace__slug=slug, project_id=project_id)
@@ -2074,6 +2076,39 @@ class IssueAttachmentDetailAPIEndpoint(BaseAPIView):
             allowed_roles=[ROLE.ADMIN.value, ROLE.MEMBER.value, ROLE.GUEST.value],
         ):
             raise PermissionDenied("You are not allowed to modify this attachment")
+
+    @issue_attachment_docs(
+        operation_id="resume_work_item_attachment_upload",
+        description="Resume an owned attachment upload, or confirm it is already uploaded without replacing it.",
+        parameters=[ATTACHMENT_ID_PARAMETER],
+        responses={200: OpenApiResponse(description="Current upload state and fresh presigned upload fields")},
+    )
+    def post(self, request, slug, project_id, issue_id, pk):
+        issue = get_object_or_404(Issue, pk=issue_id, workspace__slug=slug, project_id=project_id)
+        if not user_has_issue_permission(
+            request.user.id,
+            project_id=project_id,
+            issue=issue,
+            allowed_roles=[ROLE.ADMIN.value, ROLE.MEMBER.value, ROLE.GUEST.value],
+            allow_creator=True,
+        ):
+            raise PermissionDenied("You are not allowed to upload this attachment")
+        asset = get_object_or_404(
+            FileAsset,
+            pk=pk,
+            workspace__slug=slug,
+            project_id=project_id,
+            issue_id=issue_id,
+            created_by=request.user,
+            entity_type=FileAsset.EntityTypeContext.ISSUE_ATTACHMENT,
+            is_deleted=False,
+        )
+        upload_data = None
+        if not asset.is_uploaded:
+            upload_data = S3Storage(request=request).generate_presigned_post(
+                object_name=asset.asset.name, file_type=asset.attributes["type"], file_size=int(asset.size)
+            )
+        return Response({"asset_id": str(asset.pk), "is_uploaded": asset.is_uploaded, "upload_data": upload_data})
 
     @issue_attachment_docs(
         operation_id="delete_work_item_attachment",
