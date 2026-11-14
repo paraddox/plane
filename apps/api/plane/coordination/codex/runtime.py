@@ -74,6 +74,7 @@ class Runtime:
         self.events = asyncio.Queue()
         self.credentials = {}
         self.assignments = {}
+        self.credential_locks = {}
         self.api = httpx.AsyncClient(base_url=config.api_url, timeout=None, follow_redirects=False)
         self.clients = {
             name: CodexClient(
@@ -317,17 +318,20 @@ class Runtime:
     def address(thread):
         return {"host_id": thread.host_id, "runtime_id": thread.runtime_id, "thread_id": thread.thread_id}
 
+    def credential_lock(self, run_id):
+        return self.credential_locks.setdefault(str(run_id), asyncio.Lock())
+
     async def assignment_token(self, project, run_id):
         identifier = str(run_id)
-        if identifier not in self.assignments:
-            response = await self.api_call(project, "POST", f"coordination/runs/{run_id}/handoff/", {})
-            self.assignments[identifier] = response["token"]
-            self.credentials.pop(identifier, None)
-        return self.assignments[identifier]
+        async with self.credential_lock(identifier):
+            if identifier not in self.assignments:
+                response = await self.api_call(project, "POST", f"coordination/runs/{run_id}/handoff/", {})
+                self.assignments[identifier] = response["token"]
+                self.credentials.pop(identifier, None)
+            return self.assignments[identifier]
 
     async def task_token(self, thread, *, read_only=False):
         run = await db(AgentRun.objects.select_related("contract").get)(pk=thread.run_id)
-        cached = self.credentials.get(str(run.pk))
         if run.spec_revision != run.contract.spec_revision:
             if read_only:
                 return await self.assignment_token(self.project(thread), run.pk)
@@ -335,11 +339,14 @@ class Runtime:
                 "Specification changed. Read the current specification with read_spec, then explicitly use "
                 "acknowledge_spec with args.expected_revision before continuing implementation."
             )
-        if cached and cached[0] == run.spec_revision:
-            return cached[1]
-        response = await self.api_call(self.project(thread), "POST", f"coordination/runs/{run.pk}/credentials/", {})
-        self.credentials[str(run.pk)] = (run.spec_revision, response["token"])
-        return response["token"]
+        async with self.credential_lock(run.pk):
+            cached = self.credentials.get(str(run.pk))
+            # A waiting lookup may predate another thread's completed acknowledgement.
+            if cached and cached[0] >= run.spec_revision:
+                return cached[1]
+            response = await self.api_call(self.project(thread), "POST", f"coordination/runs/{run.pk}/credentials/", {})
+            self.credentials[str(run.pk)] = (run.spec_revision, response["token"])
+            return response["token"]
 
     async def tool(self, thread, args):
         action, values = args["action"], args.get("args", {})
@@ -381,14 +388,15 @@ class Runtime:
             if thread.role != "implementation":
                 raise ValueError("Only the implementation thread acknowledges specification changes")
             assignment = await self.assignment_token(self.project(thread), run.pk)
-            response = await self.api_call(
-                self.project(thread),
-                "POST",
-                f"coordination/runs/{run.pk}/refresh/",
-                {"expected_revision": values["expected_revision"]},
-                token=assignment,
-            )
-            self.credentials[str(run.pk)] = (values["expected_revision"], response["token"])
+            async with self.credential_lock(run.pk):
+                response = await self.api_call(
+                    self.project(thread),
+                    "POST",
+                    f"coordination/runs/{run.pk}/refresh/",
+                    {"expected_revision": values["expected_revision"]},
+                    token=assignment,
+                )
+                self.credentials[str(run.pk)] = (values["expected_revision"], response["token"])
             return {"acknowledged_revision": values["expected_revision"]}
         if not thread.run_id:
             raise ValueError("This tool needs an assigned work item")
@@ -513,14 +521,37 @@ class Runtime:
         return {"message_id": str(message.pk), "asset_id": str(asset.pk), "shared": True}
 
     async def notifications(self):
-        while True:
-            runtime_id, message = await self.events.get()
+        queues, workers = {}, set()
+
+        async def consume(key, queue):
             try:
-                await self.notification(runtime_id, message)
-            except Exception:
-                logger.exception("Codex event could not be processed")
+                while not queue.empty():
+                    runtime_id, message = queue.get_nowait()
+                    try:
+                        await self.notification(runtime_id, message)
+                    except Exception:
+                        logger.exception("Codex event could not be processed")
+                    finally:
+                        self.events.task_done()
             finally:
-                self.events.task_done()
+                queues.pop(key, None)
+
+        try:
+            while True:
+                runtime_id, message = await self.events.get()
+                key = (runtime_id, message.get("params", {}).get("threadId"))
+                queue = queues.get(key)
+                if queue is None:
+                    queue = asyncio.Queue()
+                    queues[key] = queue
+                    worker = asyncio.create_task(consume(key, queue))
+                    workers.add(worker)
+                    worker.add_done_callback(workers.discard)
+                queue.put_nowait((runtime_id, message))
+        finally:
+            for worker in workers:
+                worker.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
 
     async def notification(self, runtime_id, message):
         params = message.get("params", {})
@@ -650,6 +681,7 @@ class Runtime:
                 )
                 self.credentials.pop(str(thread.run_id), None)
                 self.assignments.pop(str(thread.run_id), None)
+                self.credential_locks.pop(str(thread.run_id), None)
                 if cancelled or messages:
                     await db(wake)()
                 if not client or not client.ready:

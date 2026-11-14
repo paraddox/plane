@@ -321,6 +321,164 @@ def test_busy_worker_keeps_working_while_chat_observes_and_queues(runtime_case):
 
 
 @pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("other_runtime,other_thread", [("local", "chat"), ("remote", "worker")])
+@pytest.mark.parametrize("failure", [False, True])
+def test_slow_notifications_do_not_block_other_threads_and_keep_thread_order(
+    runtime_case, other_runtime, other_thread, failure
+):
+    runtime, _, _, _ = runtime_case
+
+    async def exercise():
+        entered, release = asyncio.Event(), asyncio.Event()
+        seen = []
+
+        async def handle(runtime_id, message):
+            identifier = message["id"]
+            seen.append(identifier)
+            if identifier == "slow":
+                entered.set()
+                await release.wait()
+                seen.append("slow-finished")
+                if failure:
+                    raise ValueError("A failed tool must not strand later notifications")
+
+        runtime.notification = handle
+        runtime.events.put_nowait(("local", {"id": "slow", "params": {"threadId": "worker"}}))
+        runtime.events.put_nowait(("local", {"id": "same-thread", "params": {"threadId": "worker"}}))
+        runtime.events.put_nowait((other_runtime, {"id": "other-thread", "params": {"threadId": other_thread}}))
+        consumer = asyncio.create_task(runtime.notifications())
+        try:
+            await entered.wait()
+            assert "other-thread" in seen
+            assert "same-thread" not in seen
+            release.set()
+            await runtime.events.join()
+            assert seen.index("slow-finished") < seen.index("same-thread")
+        finally:
+            release.set()
+            consumer.cancel()
+            await asyncio.gather(consumer, return_exceptions=True)
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("purpose", ["execution", "assignment"])
+def test_concurrent_task_threads_share_one_credential_grant(runtime_case, monkeypatch, purpose):
+    from plane.coordination.codex import runtime as module
+    from plane.db.models import WorkItemContract
+
+    runtime, worker, chat, issue = runtime_case
+    if purpose == "assignment":
+        WorkItemContract.objects.filter(issue=issue).update(spec_revision=worker.run.spec_revision + 1)
+    original_db = module.db
+
+    async def exercise():
+        ready, entered, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        reads = 0
+
+        def simultaneous_reads(function):
+            async def read(*args, **kwargs):
+                nonlocal reads
+                result = await original_db(function)(*args, **kwargs)
+                reads += 1
+                if reads == 2:
+                    ready.set()
+                await ready.wait()
+                return result
+
+            return read
+
+        async def grant(*args, **kwargs):
+            number = runtime.api_call.await_count
+            if number == 1:
+                entered.set()
+                await release.wait()
+            return {"token": f"grant-{number}"}
+
+        monkeypatch.setattr(module, "db", simultaneous_reads)
+        runtime.api_call = AsyncMock(side_effect=grant)
+        requests = [asyncio.create_task(runtime.task_token(thread, read_only=True)) for thread in (worker, chat)]
+        try:
+            await entered.wait()
+            assert runtime.api_call.await_count == 1
+            release.set()
+            assert await asyncio.gather(*requests) == ["grant-1", "grant-1"]
+        finally:
+            release.set()
+            await asyncio.gather(*requests, return_exceptions=True)
+        suffix = "credentials/" if purpose == "execution" else "handoff/"
+        assert runtime.api_call.await_args.args[2].endswith(suffix)
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.django_db(transaction=True)
+def test_stale_task_lookup_does_not_rotate_a_newer_acknowledged_key(runtime_case, monkeypatch):
+    from plane.coordination.codex import runtime as module
+    from plane.db.models import AgentRun, WorkItemContract
+
+    runtime, worker, _, issue = runtime_case
+    original_db = module.db
+    revision = worker.run.spec_revision + 1
+
+    async def exercise():
+        captured, release = asyncio.Event(), asyncio.Event()
+
+        def delayed_read(function):
+            async def read(*args, **kwargs):
+                result = await original_db(function)(*args, **kwargs)
+                captured.set()
+                await release.wait()
+                return result
+
+            return read
+
+        monkeypatch.setattr(module, "db", delayed_read)
+        runtime.api_call = AsyncMock(return_value={"token": "unexpected-rotation"})
+        request = asyncio.create_task(runtime.task_token(worker, read_only=True))
+        try:
+            await captured.wait()
+            await original_db(WorkItemContract.objects.filter(issue=issue).update)(spec_revision=revision)
+            await original_db(AgentRun.objects.filter(pk=worker.run_id).update)(spec_revision=revision)
+            async with runtime.credential_lock(worker.run_id):
+                runtime.credentials[str(worker.run_id)] = (revision, "acknowledged-key")
+            release.set()
+            assert await request == "acknowledged-key"
+            runtime.api_call.assert_not_awaited()
+        finally:
+            release.set()
+            await asyncio.gather(request, return_exceptions=True)
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.django_db(transaction=True)
+def test_notification_shutdown_cancels_in_progress_handlers(runtime_case):
+    runtime, _, _, _ = runtime_case
+
+    async def exercise():
+        entered, stopped, blocked = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+        async def handle(*args):
+            entered.set()
+            try:
+                await blocked.wait()
+            finally:
+                stopped.set()
+
+        runtime.notification = handle
+        runtime.events.put_nowait(("local", {"params": {"threadId": "worker"}}))
+        consumer = asyncio.create_task(runtime.notifications())
+        await entered.wait()
+        consumer.cancel()
+        await asyncio.gather(consumer, return_exceptions=True)
+        assert stopped.is_set()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.django_db(transaction=True)
 def test_feedback_routes_directly_to_both_task_threads_not_overseer(runtime_case):
     runtime, worker, chat, issue = runtime_case
     overseer = CodexThread.objects.create(project=issue.project, role="overseer", host_id="mac", runtime_id="local")
@@ -499,12 +657,14 @@ def test_closure_cancels_unsent_chat_messages_even_when_host_is_offline(runtime_
     runtime.clients["local"].ready = connected
     runtime.credentials[str(worker.run_id)] = (1, "private-cached-key")
     runtime.assignments[str(worker.run_id)] = "private-assignment-key"
+    runtime.credential_lock(worker.run_id)
     asyncio.run(runtime.pump())
     message.refresh_from_db()
     assert message.state == "cancelled"
     assert chat.commands.get(pk=message.pk).state == "cancelled"
     assert str(worker.run_id) not in runtime.credentials
     assert str(worker.run_id) not in runtime.assignments
+    assert str(worker.run_id) not in runtime.credential_locks
 
 
 @pytest.mark.django_db(transaction=True)
